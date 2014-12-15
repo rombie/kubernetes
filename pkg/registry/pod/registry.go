@@ -38,4 +38,6 @@ type Registry interface {
 	UpdatePod(ctx api.Context, pod *api.Pod) error
 	// Delete an existing pod
 	DeletePod(ctx api.Context, podID string) error
+	// Delete an existing pod's netbinding
+	DeleteNetBinding(ctx api.Context, podID string) error
 }

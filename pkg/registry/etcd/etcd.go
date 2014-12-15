@@ -18,6 +18,7 @@ package etcd
 
 import (
 	"fmt"
+	"crypto/md5"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
@@ -36,6 +37,8 @@ import (
 const (
 	// PodPath is the path to pod resources in etcd
 	PodPath string = "/registry/pods"
+	// NetBindingPath is the path to the netbindings resources in etcd
+	NetBindingPath string = "/registry/netbindings"
 	// ControllerPath is the path to controller resources in etcd
 	ControllerPath string = "/registry/controllers"
 	// ServicePath is the path to service resources in etcd
@@ -89,6 +92,12 @@ func MakeEtcdItemKey(ctx api.Context, prefix string, id string) (string, error) 
 // makePodListKey constructs etcd paths to pod directories enforcing namespace rules.
 func makePodListKey(ctx api.Context) string {
 	return MakeEtcdListKey(ctx, PodPath)
+}
+
+func makeNetBindingKey(ctx api.Context, podID string) (string, error) {
+	ns,_ := api.NamespaceFrom(ctx)
+	chksum := fmt.Sprintf("%d", md5.Sum([]byte(ns))[0])
+	return (NetBindingPath+"/"+chksum+"/"+podID),nil
 }
 
 // makePodKey constructs etcd paths to pod items enforcing namespace rules.
@@ -167,6 +176,54 @@ func (r *Registry) CreatePod(ctx api.Context, pod *api.Pod) error {
 	}
 	err = r.CreateObj(key, pod, 0)
 	return etcderr.InterpretCreateError(err, "pod", pod.Name)
+}
+
+// ApplyNetBinding implements netbinding's registry
+func (r *Registry) ApplyNetBinding(ctx api.Context, netbinding *api.NetBinding) error {
+	podID := netbinding.PodID
+	contKey,_ := makeNetBindingKey(ctx, podID)
+	err := r.CreateObj(contKey, netbinding, 0)
+	if err != nil {
+		glog.Errorf("Pod %v failed to get its network assigned: %v", podID, err)
+	}
+	return etcderr.InterpretCreateError(err, "netbinding", podID)
+}
+
+// GetNetBinding returns the network information already assigned to a given pod
+func (r *Registry) GetNetBinding(ctx api.Context, podID string) (*api.NetBinding, error) {
+	var netbinding api.NetBinding
+	key,_ := makeNetBindingKey(ctx, podID)
+	err := r.ExtractObj(key, &netbinding, false)
+	if err != nil {
+		return nil, etcderr.InterpretGetError(err, "netbinding", podID)
+	}
+	return &netbinding, nil
+}
+
+
+// DeleteNetBinding deletes an existing pod's netbinding
+func (r *Registry) DeleteNetBinding(ctx api.Context, podID string) error {
+	var netpod api.NetBinding
+	key,_ := makeNetBindingKey(ctx, podID)
+	err := r.ExtractObj(key, &netpod, false)
+	if err != nil {
+		return etcderr.InterpretDeleteError(err, "pod", podID)
+	}
+	err = r.Delete(key, true)
+	if err != nil {
+		return etcderr.InterpretDeleteError(err, "pod", podID)
+	}
+	return nil
+}
+
+// WatchNetBinding watches a particular netid (vnid) for changes
+func (r *Registry) WatchNetBinding(ctx api.Context, resourceVersion string) (watch.Interface, error) {
+	version, err := tools.ParseWatchResourceVersion(resourceVersion, "netbindings")
+	if err != nil {
+		return nil, err
+	}
+	key := makeNetBindingListKey(ctx)
+	return r.WatchList(key, version, tools.Everything)
 }
 
 // ApplyBinding implements binding's registry
@@ -354,6 +411,13 @@ func (r *Registry) WatchControllers(ctx api.Context, label, field labels.Selecto
 // makeControllerListKey constructs etcd paths to controller directories enforcing namespace rules.
 func makeControllerListKey(ctx api.Context) string {
 	return MakeEtcdListKey(ctx, ControllerPath)
+}
+
+// makeNetBindingListKey constructs etcd paths to netbinding directories enforcing namespace rules.
+func makeNetBindingListKey(ctx api.Context) string {
+	ns,_ := api.NamespaceFrom(ctx)
+	chksum := fmt.Sprintf("%d", md5.Sum([]byte(ns))[0])
+	return (NetBindingPath+"/"+chksum)
 }
 
 // makeControllerKey constructs etcd paths to controller items enforcing namespace rules.

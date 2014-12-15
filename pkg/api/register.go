@@ -39,6 +39,7 @@ func init() {
 		&Endpoints{},
 		&EndpointsList{},
 		&Binding{},
+		&NetBinding{},
 		&Event{},
 		&EventList{},
 		&ContainerManifest{},
@@ -63,6 +64,7 @@ func (*EndpointsList) IsAnAPIObject()             {}
 func (*Node) IsAnAPIObject()                      {}
 func (*NodeList) IsAnAPIObject()                  {}
 func (*Binding) IsAnAPIObject()                   {}
+func (*NetBinding) IsAnAPIObject()                {}
 func (*Status) IsAnAPIObject()                    {}
 func (*ServerOp) IsAnAPIObject()                  {}
 func (*ServerOpList) IsAnAPIObject()              {}

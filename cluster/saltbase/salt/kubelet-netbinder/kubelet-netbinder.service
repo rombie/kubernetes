@@ -1,0 +1,10 @@
+[Unit]
+Description=Kubernetes Kubelet Netbinder Server
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+
+[Service]
+EnvironmentFile=/etc/sysconfig/kubelet-netbinder
+ExecStart=/usr/local/bin/kubelet-netbinder "$DAEMON_ARGS"
+
+[Install]
+WantedBy=multi-user.target

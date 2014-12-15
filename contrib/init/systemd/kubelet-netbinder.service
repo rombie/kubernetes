@@ -1,0 +1,18 @@
+[Unit]
+Description=Kubernetes Kubelet Netbinder Service
+Documentation=https://github.com/GoogleCloudPlatform/kubernetes
+After=docker.socket cadvisor.service
+Requires=kubelet.service
+
+[Service]
+EnvironmentFile=-/etc/kubernetes/config
+EnvironmentFile=-/etc/kubernetes/kubelet
+ExecStart=/usr/bin/kubelet-netbinder \
+            ${KUBE_LOGTOSTDERR} \
+            ${KUBE_LOG_LEVEL} \
+            ${KUBE_ETCD_SERVERS} \
+            ${KUBELET_HOSTNAME}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

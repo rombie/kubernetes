@@ -103,6 +103,8 @@ grep -q kbr0 /etc/sysconfig/docker || {
   # set docker bridge up, and set stp on the ovs bridge
   ip link set dev ${DOCKER_BRIDGE} up
   ovs-vsctl set Bridge ${OVS_SWITCH} stp_enable=true
+  ovs-vsctl set bridge ${OVS_SWITCH} protocols=OpenFlow13
+  ovs-vsctl add-port ${OVS_SWITCH} vxlan1 -- set interface vxlan1 type=vxlan option:remote_ip=flow option:key=flow ofport_request=10
 
   # modify the docker service file such that it uses the kube docker bridge and not its own
   #echo "OPTIONS=-b=kbr0 --iptables=false --selinux-enabled" > /etc/sysconfig/docker

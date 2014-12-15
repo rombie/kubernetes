@@ -94,6 +94,7 @@ readonly KUBE_RUN_IMAGES=(
   kube-proxy
   kube-scheduler
   kubelet
+  kubelet-netbinder
   bootstrap
 )
 

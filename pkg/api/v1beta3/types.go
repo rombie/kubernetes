@@ -765,6 +765,21 @@ type Binding struct {
 	Host string `json:"host"`
 }
 
+// NetBinding provides the network information that the pod should adopt
+type NetBinding struct {
+	TypeMeta   `json:",inline" yaml:",inline"`
+	ObjectMeta `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+
+	Vtep  string `json:"vtep" yaml:"vtep"`
+	PodID string `json:"podID" yaml:"podID"`
+	IPAddress	string `json:"ipAddress" yaml:"ipAddress"`
+	MacAddress	string `json:"macAddress" yaml:"macAddress"`
+	// NetID provides a unique network ID for the pod which will
+	// provide network isolation from pods belonging to another namespace
+	NetID		int    `json:"netID" yaml:"netID"`
+	BridgePort	int    `json:"bridgePort" yaml:"bridgePort"`
+}
+
 // Status is a return value for calls that don't return other objects.
 type Status struct {
 	TypeMeta `json:",inline"`

@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/binding"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/netbinding"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/controller"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/endpoint"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/etcd"
@@ -98,6 +99,7 @@ type Master struct {
 	endpointRegistry      endpoint.Registry
 	minionRegistry        minion.Registry
 	bindingRegistry       binding.Registry
+	netbindingRegistry    netbinding.Registry
 	eventRegistry         generic.Registry
 	storage               map[string]apiserver.RESTStorage
 	client                *client.Client
@@ -229,6 +231,7 @@ func New(c *Config) *Master {
 		serviceRegistry:       serviceRegistry,
 		endpointRegistry:      etcd.NewRegistry(c.EtcdHelper, nil),
 		bindingRegistry:       etcd.NewRegistry(c.EtcdHelper, boundPodFactory),
+		netbindingRegistry:    etcd.NewRegistry(c.EtcdHelper, nil),
 		eventRegistry:         event.NewEtcdRegistry(c.EtcdHelper, uint64(c.EventTTL.Seconds())),
 		minionRegistry:        minionRegistry,
 		client:                c.Client,
@@ -327,6 +330,7 @@ func (m *Master) init(c *Config) {
 
 		// TODO: should appear only in scheduler API group.
 		"bindings": binding.NewREST(m.bindingRegistry),
+		"netbindings": netbinding.NewREST(m.netbindingRegistry),
 	}
 
 	apiserver.NewAPIGroupVersion(m.API_v1beta1()).InstallREST(m.handlerContainer, c.APIPrefix, "v1beta1")

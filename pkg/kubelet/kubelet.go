@@ -27,8 +27,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"crypto/md5"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/capabilities"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
@@ -36,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/exec"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/golang/glog"
@@ -47,6 +50,7 @@ const defaultChanSize = 1024
 const minShares = 2
 const sharesPerCPU = 1024
 const milliCPUToCPU = 1000
+const NetBindingPath string = "/registry/netbindings"
 
 // SyncHandler is an interface implemented by Kubelet, for testability
 type SyncHandler interface {
@@ -626,7 +630,38 @@ func (kl *Kubelet) createNetworkContainer(pod *api.BoundPod) (dockertools.Docker
 	if ref != nil {
 		record.Eventf(ref, "waiting", "pulled", "Successfully pulled image %s", container.Image)
 	}
-	return kl.runContainer(pod, container, nil, "")
+	d_id, err := kl.runContainer(pod, container, nil, "")
+	// post-launch network modifications
+	kl.ModifyNetwork(pod, d_id)
+	return d_id,err
+}
+
+// Get the netbinding information for the pod, and modify the container network in-place.
+func (kl *Kubelet) ModifyNetwork(pod *api.BoundPod, dockerID dockertools.DockerID) {
+	helper := tools.EtcdHelper{
+		kl.etcdClient,
+		latest.Codec,
+		tools.RuntimeVersionAdapter{latest.ResourceVersioner},
+	}
+	nb := &api.NetBinding{}
+	chksum := strconv.Itoa(int(md5.Sum([]byte(pod.Namespace))[0]))
+	key := (NetBindingPath+"/"+chksum+"/"+pod.Name)
+	// curl http://etcd:4001/v2/keys/netbindings/vnid/podname 
+	err := helper.ExtractObj(key, nb, false) 
+	if err!=nil {
+		fmt.Printf("Error in fetching netbinding for pod %v.\nError: %v\n", pod, err)
+		return 
+	}
+	// `post-modify-script docker_id pod_name ip mac netid ovs_port`
+	
+	ex := exec.New()
+	cmd := ex.Command("pod-set-local-network.sh", string(dockerID), pod.Name, nb.IPAddress, nb.MacAddress, strconv.Itoa(nb.NetID), strconv.Itoa(nb.BridgePort))
+	out, err := cmd.CombinedOutput()
+	fmt.Printf("Output of modifying network of %s: %s\n", pod.Name, out)
+	if err!=nil {
+		fmt.Printf("Error while modifying network of %s: %v\n", pod.Name, err)
+	}
+	return 
 }
 
 // Kill all containers in a pod.  Returns the number of containers deleted and an error if one occurs.

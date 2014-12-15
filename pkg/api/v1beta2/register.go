@@ -41,6 +41,7 @@ func init() {
 		&Minion{},
 		&MinionList{},
 		&Binding{},
+		&NetBinding{},
 		&Status{},
 		&ServerOp{},
 		&ServerOpList{},
@@ -68,6 +69,7 @@ func (*EndpointsList) IsAnAPIObject()             {}
 func (*Minion) IsAnAPIObject()                    {}
 func (*MinionList) IsAnAPIObject()                {}
 func (*Binding) IsAnAPIObject()                   {}
+func (*NetBinding) IsAnAPIObject()                {}
 func (*Status) IsAnAPIObject()                    {}
 func (*ServerOp) IsAnAPIObject()                  {}
 func (*ServerOpList) IsAnAPIObject()              {}

@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler"
+	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/netscheduler"
 
 	"github.com/golang/glog"
 )
@@ -121,6 +122,7 @@ func (factory *ConfigFactory) Create(predicateKeys, priorityKeys []string) (*sch
 		MinionLister: factory.MinionLister,
 		Algorithm:    algo,
 		Binder:       &binder{factory.Client},
+		NetConfig:    netscheduler.NewNetScheduler("",""),
 		NextPod: func() *api.Pod {
 			pod := factory.PodQueue.Pop().(*api.Pod)
 			glog.V(2).Infof("glog.v2 --> About to try and schedule pod %v", pod.Name)
@@ -350,6 +352,12 @@ func (b *binder) Bind(binding *api.Binding) error {
 	glog.V(2).Infof("Attempting to bind %v to %v", binding.PodID, binding.Host)
 	ctx := api.WithNamespace(api.NewContext(), binding.Namespace)
 	return b.Post().Namespace(api.Namespace(ctx)).Path("bindings").Body(binding).Do().Error()
+}
+
+func (b *binder) NetBind(netbinding *api.NetBinding) error {
+	glog.V(2).Infof("Attempting to assign netconfig(%s,%s,%s) to %v", netbinding.IPAddress, netbinding.MacAddress, netbinding.NetID, netbinding.PodID)
+	ctx := api.WithNamespace(api.NewContext(), netbinding.Namespace)
+	return b.Post().Namespace(api.Namespace(ctx)).Path("netbindings").Body(netbinding).Do().Error()
 }
 
 type clock interface {

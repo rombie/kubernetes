@@ -29,9 +29,20 @@ import (
 
 type fakeBinder struct {
 	b func(binding *api.Binding) error
+	nb func(netbinding *api.NetBinding) error
+}
+
+type fakeNetConfig struct {
+	a func(pod *api.Pod) (*api.NetBinding, error) 
+}
+
+func (fnc fakeNetConfig) AllocateNetBinding(pod *api.Pod) (*api.NetBinding, error) {
+	return fnc.a(pod)
 }
 
 func (fb fakeBinder) Bind(binding *api.Binding) error { return fb.b(binding) }
+
+func (fb fakeBinder) NetBind(netbinding *api.NetBinding) error { return fb.nb(netbinding) }
 
 func podWithID(id string) *api.Pod {
 	return &api.Pod{ObjectMeta: api.ObjectMeta{Name: id, SelfLink: testapi.SelfLink("pods", id)}}
@@ -86,14 +97,21 @@ func TestScheduler(t *testing.T) {
 		var gotError error
 		var gotPod *api.Pod
 		var gotBinding *api.Binding
+		var gotNetBinding *api.NetBinding
 		c := &Config{
 			MinionLister: scheduler.FakeMinionLister(
 				api.NodeList{Items: []api.Node{{ObjectMeta: api.ObjectMeta{Name: "machine1"}}}},
 			),
 			Algorithm: item.algo,
-			Binder: fakeBinder{func(b *api.Binding) error {
+			NetConfig: fakeNetConfig{a: func(p *api.Pod) (*api.NetBinding, error) {
+					return nil, nil
+				}},
+			Binder: fakeBinder{b: func(b *api.Binding) error {
 				gotBinding = b
 				return item.injectBindError
+			}, nb: func(b *api.NetBinding) error {
+				gotNetBinding = b
+				return nil
 			}},
 			Error: func(p *api.Pod, err error) {
 				gotPod = p

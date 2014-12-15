@@ -24,6 +24,7 @@ readonly KUBE_SERVER_TARGETS=(
   cmd/kube-apiserver
   cmd/kube-controller-manager
   cmd/kubelet
+  cmd/kubelet-netbinder
   plugin/cmd/kube-scheduler
 )
 readonly KUBE_SERVER_BINARIES=("${KUBE_SERVER_TARGETS[@]##*/}")

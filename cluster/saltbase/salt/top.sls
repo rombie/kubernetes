@@ -7,6 +7,7 @@ base:
     - match: grain
     - docker
     - kubelet
+    - kubelet-netbinder
     - kube-proxy
 {% if pillar['enable_node_monitoring'] is defined and pillar['enable_node_monitoring'] %}
     - cadvisor

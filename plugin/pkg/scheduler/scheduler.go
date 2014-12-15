@@ -29,6 +29,12 @@ import (
 // Binder knows how to write a binding.
 type Binder interface {
 	Bind(binding *api.Binding) error
+	NetBind(netbinding *api.NetBinding) error
+}
+
+// NetConfig knows how to allocate network parameters
+type NetConfig interface {
+	AllocateNetBinding(pod *api.Pod) (*api.NetBinding, error)
 }
 
 // Scheduler watches for new unscheduled pods. It attempts to find
@@ -40,6 +46,7 @@ type Scheduler struct {
 type Config struct {
 	MinionLister scheduler.MinionLister
 	Algorithm    scheduler.Scheduler
+	NetConfig    NetConfig
 	Binder       Binder
 
 	// NextPod should be a function that blocks until the next pod
@@ -68,6 +75,16 @@ func (s *Scheduler) Run() {
 
 func (s *Scheduler) scheduleOne() {
 	pod := s.config.NextPod()
+
+	// Get network parameters allocated for the new pod
+	glog.V(3).Infof("Attempting to netbind: %v", pod)
+	netbinding, err := s.config.NetConfig.AllocateNetBinding(pod)
+	if err != nil {
+		glog.V(1).Infof("Failed to provide netbinding for %v", pod)
+		return
+	}
+
+	// Find a place for pod to sit
 	glog.V(3).Infof("Attempting to schedule: %v", pod)
 	dest, err := s.config.Algorithm.Schedule(*pod, s.config.MinionLister)
 	if err != nil {
@@ -76,6 +93,14 @@ func (s *Scheduler) scheduleOne() {
 		s.config.Error(pod, err)
 		return
 	}
+
+	// Network and Host has been decided, first write the netbinding, then the host
+	netbinding.Vtep = dest
+	if err := s.config.Binder.NetBind(netbinding); err != nil {
+		glog.V(1).Infof("Failed to bind pod: %v", err)
+		return
+	}
+
 	b := &api.Binding{
 		ObjectMeta: api.ObjectMeta{Namespace: pod.Namespace},
 		PodID:      pod.Name,

@@ -444,6 +444,41 @@ func init() {
 			return nil
 		},
 
+		func(in *newer.NetBinding, out *NetBinding, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.ObjectMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+
+			out.Vtep = in.Vtep
+			out.BridgePort = in.BridgePort
+			out.PodID = in.PodID
+			out.IPAddress = in.IPAddress
+			out.MacAddress = in.MacAddress
+			out.NetID = in.NetID
+
+			return nil
+		},
+		func(in *NetBinding, out *newer.NetBinding, s conversion.Scope) error {
+			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
+				return err
+			}
+			if err := s.Convert(&in.TypeMeta, &out.ObjectMeta, 0); err != nil {
+				return err
+			}
+
+			out.Vtep = in.Vtep
+			out.BridgePort = in.BridgePort
+			out.PodID = in.PodID
+			out.IPAddress = in.IPAddress
+			out.MacAddress = in.MacAddress
+			out.NetID = in.NetID
+
+			return nil
+		},
+
 		func(in *newer.Node, out *Minion, s conversion.Scope) error {
 			if err := s.Convert(&in.TypeMeta, &out.TypeMeta, 0); err != nil {
 				return err

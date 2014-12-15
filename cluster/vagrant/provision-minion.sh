@@ -38,6 +38,8 @@ for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
   fi
 done
 
+cp -f /vagrant/cmd/kubelet/bin/jq /vagrant/cmd/kubelet/bin/pod*sh /vagrant/cmd/kubelet-netbinder/bin/pod*sh /usr/local/bin/
+
 # Let the minion know who its master is
 mkdir -p /etc/salt/minion.d
 echo "master: $MASTER_NAME" > /etc/salt/minion.d/master.conf

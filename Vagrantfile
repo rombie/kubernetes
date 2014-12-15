@@ -22,8 +22,8 @@ $kube_os = ENV['KUBERNETES_OS'] || "fedora"
 # OS platform to box information
 $kube_box = {
   "fedora" => {
-    "name" => "fedora20",
-    "box_url" => "http://opscode-vm-bento.s3.amazonaws.com/vagrant/virtualbox/opscode_fedora-20_chef-provisionerless.box"
+    "name" => "fedora20_openshift",
+    "box_url" => "https://mirror.openshift.com/pub/vagrant/boxes/openshift3/fedora_20_latest.box"
   }
 }
 

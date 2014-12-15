@@ -589,6 +589,20 @@ type Binding struct {
 	Host     string `json:"host" description:"host to which to bind the specified pod"`
 }
 
+// NetBinding provides the network information that the pod should adopt
+type NetBinding struct {
+	TypeMeta   `json:",inline" yaml:",inline"`
+
+	Vtep  string `json:"vtep" yaml:"vtep"`
+	PodID string `json:"podID" yaml:"podID"`
+	IPAddress	string `json:"ipAddress" yaml:"ipAddress"`
+	MacAddress	string `json:"macAddress" yaml:"macAddress"`
+	// NetID provides a unique network ID for the pod which will
+	// provide network isolation from pods belonging to another namespace
+	NetID		int    `json:"netID" yaml:"netID"`
+	BridgePort	int    `json:"bridgePort" yaml:"bridgePort"`
+}
+
 // Status is a return value for calls that don't return other objects.
 // TODO: this could go in apiserver, but I'm including it here so clients needn't
 // import both.

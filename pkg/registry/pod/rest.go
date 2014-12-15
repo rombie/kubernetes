@@ -111,6 +111,10 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (<-chan apiserver.RE
 
 func (rs *REST) Delete(ctx api.Context, id string) (<-chan apiserver.RESTResult, error) {
 	return apiserver.MakeAsync(func() (runtime.Object, error) {
+ 		err := rs.registry.DeleteNetBinding(ctx, id)
+		if err!=nil {
+			glog.Errorf("Error deleting netbinding info from container: %v", err)
+		}
 		return &api.Status{Status: api.StatusSuccess}, rs.registry.DeletePod(ctx, id)
 	}), nil
 }
