@@ -67,6 +67,8 @@ func init() {
 	exec.New().Command("ovs-ofctl", "add-flow", "-O", "OpenFlow13", "obr0", "table=0,priority=200,in_port=10,actions=goto_table:1").CombinedOutput()
 	exec.New().Command("ovs-ofctl", "add-flow", "-O", "OpenFlow13", "obr0", "table=0,priority=50,in_port=3,actions=goto_table:2").CombinedOutput()
 	exec.New().Command("ovs-ofctl", "add-flow", "-O", "OpenFlow13", "obr0", "table=1,priority=100,actions=output:3").CombinedOutput()
+	exec.New().Command("sh", "-c", "iptables -t nat -D POSTROUTING -s 10.246.0.0/16 ! -d 10.246.0.0/16 -j MASQUERADE").CombinedOutput()
+	exec.New().Command("sh", "-c", "iptables -t nat -A POSTROUTING -s 10.246.0.0/16 ! -d 10.246.0.0/16 -j MASQUERADE").CombinedOutput()
 }
 
 func makeEtcdClient() *etcd.Client {
