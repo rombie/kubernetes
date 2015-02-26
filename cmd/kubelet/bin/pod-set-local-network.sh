@@ -9,6 +9,7 @@ ip=$3
 mac=$4
 netid=$5
 ovs_port=$6
+tap_port=3
 
 iphex=`printf '%02x' ${ip//./ }; echo`
 machex=`printf '%s' ${mac//:/ }; echo`
@@ -25,12 +26,16 @@ if [ "$docker_id" != "" ]; then
 	nsenter -n -t $pid -- ip link set dev eth0 addr $mac
 	nsenter -n -t $pid -- ip addr add ${ip}/24 dev eth0
 	nsenter -n -t $pid -- ip link set dev eth0 up
+	nsenter -n -t $pid -- ip route set default via 10.246.1.1 dev eth0
 fi
 
 ## add flows
 
 # rule to add vnid to outbound traffic from pod
-ovs-ofctl add-flow -O OpenFlow13 obr0 "table=0,cookie=${netid},in_port=${ovs_port},actions=set_field:${netid}->tun_id,goto_table:1"
+ovs-ofctl add-flow -O OpenFlow13 obr0 "table=0,cookie=${netid},priority=200,in_port=${ovs_port},actions=set_field:${netid}->tun_id,goto_table:1"
+# rule to send traffic meant for this pod to the correct port
+ovs-ofctl add-flow -O OpenFlow13 obr0 "table=2,cookie=${tap_port},priority=200,arp,nw_dst=${ip},actions=output:${ovs_port}"
+ovs-ofctl add-flow -O OpenFlow13 obr0 "table=2,cookie=${tap_port},priority=200,ip,nw_dst=${ip},actions=output:${ovs_port}"
 # rule to identify inbound traffic for pod and redirect it to correct ovs-port/veth-pair
 ovs-ofctl add-flow -O OpenFlow13 obr0 "table=1,cookie=${netid},priority=200,tun_id=${netid},dl_dst=${mac},actions=output:${ovs_port}"
 # rule to respond to arp requests that come locally from this host
