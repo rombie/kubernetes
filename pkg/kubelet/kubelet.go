@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/envvars"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/metrics"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/network"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/volume"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/probe"
@@ -118,6 +119,8 @@ func NewMainKubelet(
 	clusterDNS net.IP,
 	masterServiceNamespace string,
 	volumePlugins []volume.Plugin,
+	networkPlugins []network.NetworkPlugin,
+	networkPluginName string,
 	streamingConnectionIdleTimeout time.Duration,
 	recorder record.EventRecorder,
 	cadvisorInterface cadvisor.Interface,
@@ -215,6 +218,12 @@ func NewMainKubelet(
 		return nil, err
 	}
 
+	if plug, err := network.InitNetworkPlugin(networkPlugins, networkPluginName, &networkHost{klet}); err != nil {
+		return nil, err
+	} else {
+		klet.networkPlugin = plug
+	}
+
 	klet.podStatuses = make(map[string]api.PodStatus)
 
 	klet.mirrorManager = newBasicMirrorManager(klet.kubeClient)
@@ -286,6 +295,9 @@ type Kubelet struct {
 
 	// Volume plugins.
 	volumePluginMgr volume.PluginMgr
+
+	// Network plugin
+	networkPlugin network.NetworkPlugin
 
 	// probe runner holder
 	prober probeHolder
@@ -1340,6 +1352,11 @@ func (kl *Kubelet) syncPod(pod *api.Pod, hasMirrorPod bool, containersInPod dock
 		}
 		glog.Infof("Creating pod infra container for %q", podFullName)
 		podInfraContainerID, err = kl.createPodInfraContainer(pod)
+
+		// Call the networking plugin
+		if err == nil {
+			err = kl.networkPlugin.SetUpPod(pod.Name, pod.Namespace, podInfraContainerID)
+		}
 		if err != nil {
 			glog.Errorf("Failed to create pod infra container: %v; Skipping pod %q", err, podFullName)
 			return err
@@ -1530,6 +1547,14 @@ func (kl *Kubelet) SyncPods(allPods []api.Pod, podSyncTypes map[types.UID]metric
 		pc := podContainer{podFullName, uid, containerName}
 		_, ok := desiredContainers[pc]
 		if err != nil || !ok {
+			// call the networking plugin for teardown
+			if containerName == dockertools.PodInfraContainerName {
+				name, namespace, _ := ParsePodFullName(podFullName)
+				err := kl.networkPlugin.TearDownPod(name, namespace, dockertools.DockerID(dockerContainers[ix].ID))
+				if err != nil {
+					glog.Errorf("Network plugin pre-delete method returned an error: %v", err)
+				}
+			}
 			glog.V(1).Infof("Killing unwanted container %+v", pc)
 			err = kl.killContainer(dockerContainers[ix])
 			if err != nil {
