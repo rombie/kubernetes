@@ -28,12 +28,12 @@ $minion_ips = $num_minion.times.collect { |n| $minion_ip_base + "#{n+3}" }
 $kube_os = ENV['KUBERNETES_OS'] || "fedora"
 
 # Check if we already have kube box
-$kube_box_url = ENV['KUBERNETES_BOX_URL'] || "http://opscode-vm-bento.s3.amazonaws.com/vagrant/virtualbox/opscode_fedora-20_chef-provisionerless.box"
+$kube_box_url = ENV['KUBERNETES_BOX_URL'] || "http://opscode-vm-bento.s3.amazonaws.com/vagrant/virtualbox/opscode_fedora-21_chef-provisionerless.box"
 
 # OS platform to box information
 $kube_box = {
   "fedora" => {
-    "name" => "fedora20",
+    "name" => "fedora21",
     "box_url" => $kube_box_url 
   }
 }
@@ -79,7 +79,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       c.vm.provision "shell", run: "always", path: script
     end
     c.vm.network "private_network", ip: "#{$master_ip}"
-    c.vm.hostname = ENV['MASTER_NAME']
+    #c.vm.hostname = ENV['MASTER_NAME']
   end
 
   # Kubernetes minion
@@ -94,7 +94,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         minion.vm.provision "shell", run: "always", path: script
       end
       minion.vm.network "private_network", ip: "#{minion_ip}"
-      minion.vm.hostname = "#{ENV['INSTANCE_PREFIX']}-minion-#{minion_index}"
+      #minion.vm.hostname = "#{ENV['INSTANCE_PREFIX']}-minion-#{minion_index}"
     end
   end
 end

@@ -45,6 +45,7 @@ if [[ ! -f "$salt_tar" ]]; then
   release_not_found
 fi
 
+hostnamectl set-hostname $MASTER_NAME
 
 # Setup hosts file to support ping by hostname to each minion in the cluster from apiserver
 for (( i=0; i<${#MINION_NAMES[@]}; i++)); do

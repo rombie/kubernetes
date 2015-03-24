@@ -17,6 +17,8 @@
 # exit on any error
 set -e
 
+hostnamectl set-hostname ${MINION_NAMES[$MINION_ID]}
+
 # Setup hosts file to support ping by hostname to master
 if [ ! "$(cat /etc/hosts | grep $MASTER_NAME)" ]; then
   echo "Adding $MASTER_NAME to hosts file"
