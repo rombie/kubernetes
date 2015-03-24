@@ -28,12 +28,12 @@ $minion_ips = $num_minion.times.collect { |n| $minion_ip_base + "#{n+3}" }
 $kube_os = ENV['KUBERNETES_OS'] || "fedora"
 
 # Check if we already have kube box
-$kube_box_url = ENV['KUBERNETES_BOX_URL'] || "http://opscode-vm-bento.s3.amazonaws.com/vagrant/virtualbox/opscode_fedora-20_chef-provisionerless.box"
+$kube_box_url = ENV['KUBERNETES_BOX_URL'] || "http://opscode-vm-bento.s3.amazonaws.com/vagrant/virtualbox/opscode_fedora-21_chef-provisionerless.box"
 
 # OS platform to box information
 $kube_box = {
   "fedora" => {
-    "name" => "fedora20",
+    "name" => "fedora21",
     "box_url" => $kube_box_url 
   }
 }
