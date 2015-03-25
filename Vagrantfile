@@ -79,7 +79,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       c.vm.provision "shell", run: "always", path: script
     end
     c.vm.network "private_network", ip: "#{$master_ip}"
-    c.vm.hostname = ENV['MASTER_NAME']
+    #c.vm.hostname = ENV['MASTER_NAME']
   end
 
   # Kubernetes minion
@@ -94,7 +94,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         minion.vm.provision "shell", run: "always", path: script
       end
       minion.vm.network "private_network", ip: "#{minion_ip}"
-      minion.vm.hostname = "#{ENV['INSTANCE_PREFIX']}-minion-#{minion_index}"
+      #minion.vm.hostname = "#{ENV['INSTANCE_PREFIX']}-minion-#{minion_index}"
     end
   end
 end
