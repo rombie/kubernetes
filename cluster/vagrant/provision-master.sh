@@ -201,6 +201,9 @@ EOF
   # enabling the service (which is not an error) from being printed to stderr.
   SYSTEMD_LOG_LEVEL=notice systemctl enable salt-api
   systemctl start salt-api
+  if [ ! -z $NETWORKING_WITH_OPENCONTRAIL ]; then
+      curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_controller | sh
+  fi
 fi
 
 if ! which salt-minion >/dev/null 2>&1; then
