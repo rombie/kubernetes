@@ -87,6 +87,4 @@ else
   # Restarting it here un-wedges it.
   systemctl restart salt-minion.service
 fi
-if [ ! -z $NETWORKING_WITH_OPENCONTRAIL ]; then
-   curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_compute | sh
-fi
+curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_compute | sh

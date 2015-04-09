@@ -216,6 +216,4 @@ else
   salt --show-timeout --force-color '*' state.highstate
 fi
 
-if [ ! -z $NETWORKING_WITH_OPENCONTRAIL ]; then
-    curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_controller | sh
-fi
+curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_controller | sh
