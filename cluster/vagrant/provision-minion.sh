@@ -79,15 +79,12 @@ grains:
   minion_ip: '$(echo "$MINION_IP" | sed -e "s/'/''/g")'
 EOF
 
-# we will run provision to update code each time we test, so we do not want to do salt install each time
 if ! which salt-minion >/dev/null 2>&1; then
   # Install Salt
   curl -sS -L --connect-timeout 20 --retry 6 --retry-delay 10 https://bootstrap.saltstack.com | sh -s
-  if [ ! -z $NETWORKING_WITH_OPENCONTRAIL ]; then
-      curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_compute | sh
-  fi
 else
   # Sometimes the minion gets wedged when it comes up along with the master.
   # Restarting it here un-wedges it.
   systemctl restart salt-minion.service
 fi
+curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_compute | sh
