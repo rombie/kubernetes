@@ -216,4 +216,14 @@ else
   salt --show-timeout --force-color '*' state.highstate
 fi
 
-curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_controller | sh
+if [ $? != 0 ]; then
+    sudo yum -y install ruby
+fi
+
+set -e
+
+CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
+rm -rf $CONTRAIL_KUBERNETES
+sudo yum -y install ruby git
+git clone https://github.com/rombie/contrail-kubernetes.git $CONTRAIL_KUBERNETES
+sudo ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb controller
