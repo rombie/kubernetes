@@ -88,6 +88,11 @@ else
   systemctl restart salt-minion.service
 fi
 
+# re install docker because of this: https://github.com/docker/docker/issues/11135
+# required only for fedora21 bentobox image, but not checking for all that now
+yum -y remove docker-io || true
+yum -y install docker-io
+
 CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
 rm -rf $CONTRAIL_KUBERNETES
 sudo yum -y install ruby git
