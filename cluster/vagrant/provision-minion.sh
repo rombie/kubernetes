@@ -87,4 +87,9 @@ else
   # Restarting it here un-wedges it.
   systemctl restart salt-minion.service
 fi
-curl -s https://raw.githubusercontent.com/rombie/opencontrail-netns/master/provision/fedora/contrail_install_compute | sh
+
+CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
+rm -rf $CONTRAIL_KUBERNETES
+sudo yum -y install ruby git
+git clone https://github.com/rombie/contrail-kubernetes.git $CONTRAIL_KUBERNETES
+sudo ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb compute
