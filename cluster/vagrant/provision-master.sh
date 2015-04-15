@@ -216,12 +216,6 @@ else
   salt --show-timeout --force-color '*' state.highstate
 fi
 
-if [ $? != 0 ]; then
-    sudo yum -y install ruby
-fi
-
-set -e
-
 CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
 rm -rf $CONTRAIL_KUBERNETES
 sudo yum -y install ruby git
