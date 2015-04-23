@@ -218,6 +218,6 @@ fi
 
 CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
 rm -rf $CONTRAIL_KUBERNETES
-sudo yum -y install ruby git
+yum -y install ruby git
 git clone https://github.com/rombie/contrail-kubernetes.git $CONTRAIL_KUBERNETES
-sudo ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb controller
+ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb controller
