@@ -18,9 +18,11 @@ package controller
 
 import (
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
-	"path"
+	"reflect"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -29,26 +31,20 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 )
 
-func makeNamespaceURL(namespace, suffix string) string {
-	if !(testapi.Version() == "v1beta1" || testapi.Version() == "v1beta2") {
-		return makeURL("/namespaces/" + namespace + suffix)
-	}
-	return makeURL(suffix + "?namespace=" + namespace)
-}
-
-func makeURL(suffix string) string {
-	return path.Join("/api", testapi.Version(), suffix)
-}
-
 type FakePodControl struct {
 	controllerSpec []api.ReplicationController
 	deletePodName  []string
 	lock           sync.Mutex
+}
+
+func init() {
+	api.ForTesting_ReferencesAllowBlankSelfLinks = true
 }
 
 func (f *FakePodControl) createReplica(namespace string, spec api.ReplicationController) {
@@ -67,7 +63,7 @@ func (f *FakePodControl) deletePod(namespace string, podName string) error {
 func newReplicationController(replicas int) api.ReplicationController {
 	return api.ReplicationController{
 		TypeMeta:   api.TypeMeta{APIVersion: testapi.Version()},
-		ObjectMeta: api.ObjectMeta{Name: "foobar", Namespace: "default", ResourceVersion: "18"},
+		ObjectMeta: api.ObjectMeta{Name: "foobar", Namespace: api.NamespaceDefault, ResourceVersion: "18"},
 		Spec: api.ReplicationControllerSpec{
 			Replicas: replicas,
 			Template: &api.PodTemplateSpec{
@@ -119,6 +115,47 @@ func validateSyncReplication(t *testing.T, fakePodControl *FakePodControl, expec
 	}
 }
 
+func replicationControllerResourceName() string {
+	if api.PreV1Beta3(testapi.Version()) {
+		return "replicationControllers"
+	}
+	return "replicationcontrollers"
+}
+
+type serverResponse struct {
+	statusCode int
+	obj        interface{}
+}
+
+func makeTestServer(t *testing.T, namespace, name string, podResponse, controllerResponse, updateResponse serverResponse) (*httptest.Server, *util.FakeHandler) {
+	fakePodHandler := util.FakeHandler{
+		StatusCode:   podResponse.statusCode,
+		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), podResponse.obj.(runtime.Object)),
+	}
+	fakeControllerHandler := util.FakeHandler{
+		StatusCode:   controllerResponse.statusCode,
+		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), controllerResponse.obj.(runtime.Object)),
+	}
+	fakeUpdateHandler := util.FakeHandler{
+		StatusCode:   updateResponse.statusCode,
+		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), updateResponse.obj.(runtime.Object)),
+	}
+	mux := http.NewServeMux()
+	mux.Handle(testapi.ResourcePath("pods", namespace, ""), &fakePodHandler)
+	mux.Handle(testapi.ResourcePath(replicationControllerResourceName(), "", ""), &fakeControllerHandler)
+	if !api.PreV1Beta3(testapi.Version()) && namespace != "" {
+		mux.Handle(testapi.ResourcePath(replicationControllerResourceName(), namespace, ""), &fakeControllerHandler)
+	}
+	if name != "" {
+		mux.Handle(testapi.ResourcePath(replicationControllerResourceName(), namespace, name), &fakeUpdateHandler)
+	}
+	mux.HandleFunc("/", func(res http.ResponseWriter, req *http.Request) {
+		t.Errorf("unexpected request: %v", req.RequestURI)
+		res.WriteHeader(http.StatusNotFound)
+	})
+	return httptest.NewServer(mux), &fakeUpdateHandler
+}
+
 func TestSyncReplicationControllerDoesNothing(t *testing.T) {
 	body, _ := latest.Codec.Encode(newPodList(2))
 	fakeHandler := util.FakeHandler{
@@ -162,28 +199,16 @@ func TestSyncReplicationControllerDeletes(t *testing.T) {
 }
 
 func TestSyncReplicationControllerCreates(t *testing.T) {
-	body := runtime.EncodeOrDie(testapi.Codec(), newPodList(0))
-	fakePodHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: string(body),
-	}
-	fakePodControl := FakePodControl{}
-
 	controller := newReplicationController(2)
-	fakeUpdateHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), &controller),
-		T:            t,
-	}
-
-	testServerMux := http.NewServeMux()
-	testServerMux.Handle("/api/"+testapi.Version()+"/pods/", &fakePodHandler)
-	testServerMux.Handle(fmt.Sprintf("/api/"+testapi.Version()+"/replicationControllers/%s", controller.Name), &fakeUpdateHandler)
-	testServer := httptest.NewServer(testServerMux)
+	testServer, fakeUpdateHandler := makeTestServer(t, api.NamespaceDefault, controller.Name,
+		serverResponse{http.StatusOK, newPodList(0)},
+		serverResponse{http.StatusInternalServerError, &api.ReplicationControllerList{}},
+		serverResponse{http.StatusOK, &controller})
 	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 
 	manager := NewReplicationManager(client)
+	fakePodControl := FakePodControl{}
 	manager.podControl = &fakePodControl
 	manager.syncReplicationController(controller)
 	validateSyncReplication(t, &fakePodControl, 2, 0)
@@ -226,7 +251,7 @@ func TestCreateReplica(t *testing.T) {
 		},
 		Spec: controllerSpec.Spec.Template.Spec,
 	}
-	fakeHandler.ValidateRequest(t, makeNamespaceURL("default", "/pods"), "POST", nil)
+	fakeHandler.ValidateRequest(t, testapi.ResourcePathWithQueryParams("pods", api.NamespaceDefault, ""), "POST", nil)
 	actualPod, err := client.Codec.Decode([]byte(fakeHandler.RequestBody))
 	if err != nil {
 		t.Errorf("Unexpected error: %#v", err)
@@ -246,29 +271,14 @@ func TestSynchronize(t *testing.T) {
 		"type": "production",
 	}
 
-	fakePodHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: "{\"apiVersion\": \"" + testapi.Version() + "\", \"kind\": \"PodList\"}",
-		T:            t,
-	}
-	fakeControllerHandler := util.FakeHandler{
-		StatusCode: 200,
-		ResponseBody: runtime.EncodeOrDie(latest.Codec, &api.ReplicationControllerList{
+	testServer, _ := makeTestServer(t, api.NamespaceDefault, "",
+		serverResponse{http.StatusOK, newPodList(0)},
+		serverResponse{http.StatusOK, &api.ReplicationControllerList{
 			Items: []api.ReplicationController{
 				controllerSpec1,
 				controllerSpec2,
-			},
-		}),
-		T: t,
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/api/"+testapi.Version()+"/pods/", &fakePodHandler)
-	mux.Handle("/api/"+testapi.Version()+"/replicationControllers/", &fakeControllerHandler)
-	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		t.Errorf("Unexpected request for %v", req.RequestURI)
-	})
-	testServer := httptest.NewServer(mux)
+			}}},
+		serverResponse{http.StatusInternalServerError, &api.ReplicationController{}})
 	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	manager := NewReplicationManager(client)
@@ -286,34 +296,12 @@ func TestControllerNoReplicaUpdate(t *testing.T) {
 	rc.Status = api.ReplicationControllerStatus{Replicas: 5}
 	activePods := 5
 
-	body, _ := latest.Codec.Encode(newPodList(activePods))
-	fakePodHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: string(body),
-		T:            t,
-	}
-	fakeControllerHandler := util.FakeHandler{
-		StatusCode: 200,
-		ResponseBody: runtime.EncodeOrDie(latest.Codec, &api.ReplicationControllerList{
+	testServer, fakeUpdateHandler := makeTestServer(t, api.NamespaceDefault, rc.Name,
+		serverResponse{http.StatusOK, newPodList(activePods)},
+		serverResponse{http.StatusOK, &api.ReplicationControllerList{
 			Items: []api.ReplicationController{rc},
-		}),
-		T: t,
-	}
-	fakeUpdateHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), &rc),
-		T:            t,
-	}
-
-	mux := http.NewServeMux()
-	mux.Handle("/api/"+testapi.Version()+"/pods/", &fakePodHandler)
-	mux.Handle("/api/"+testapi.Version()+"/replicationControllers/", &fakeControllerHandler)
-	mux.Handle(fmt.Sprintf("/api/"+testapi.Version()+"/replicationControllers/%s", rc.Name), &fakeUpdateHandler)
-	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		t.Errorf("Unexpected request for %v", req.RequestURI)
-	})
-	testServer := httptest.NewServer(mux)
+		}},
+		serverResponse{http.StatusOK, &rc})
 	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	manager := NewReplicationManager(client)
@@ -336,35 +324,12 @@ func TestControllerUpdateReplicas(t *testing.T) {
 	rc.Status = api.ReplicationControllerStatus{Replicas: 2}
 	activePods := 4
 
-	body, _ := latest.Codec.Encode(newPodList(activePods))
-	fakePodHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: string(body),
-		T:            t,
-	}
-	fakeControllerHandler := util.FakeHandler{
-		StatusCode: 200,
-		ResponseBody: runtime.EncodeOrDie(latest.Codec, &api.ReplicationControllerList{
+	testServer, fakeUpdateHandler := makeTestServer(t, api.NamespaceDefault, rc.Name,
+		serverResponse{http.StatusOK, newPodList(activePods)},
+		serverResponse{http.StatusOK, &api.ReplicationControllerList{
 			Items: []api.ReplicationController{rc},
-		}),
-		T: t,
-	}
-	fakeUpdateHandler := util.FakeHandler{
-		StatusCode:   200,
-		ResponseBody: runtime.EncodeOrDie(testapi.Codec(), &rc),
-		T:            t,
-	}
-
-	mux := http.NewServeMux()
-
-	mux.Handle("/api/"+testapi.Version()+"/pods/", &fakePodHandler)
-	mux.Handle("/api/"+testapi.Version()+"/replicationControllers/", &fakeControllerHandler)
-	mux.Handle(fmt.Sprintf("/api/"+testapi.Version()+"/replicationControllers/%s", rc.Name), &fakeUpdateHandler)
-	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		t.Errorf("Unexpected request for %v", req.RequestURI)
-	})
-	testServer := httptest.NewServer(mux)
+		}},
+		serverResponse{http.StatusOK, &rc})
 	defer testServer.Close()
 	client := client.NewOrDie(&client.Config{Host: testServer.URL, Version: testapi.Version()})
 	manager := NewReplicationManager(client)
@@ -375,19 +340,23 @@ func TestControllerUpdateReplicas(t *testing.T) {
 
 	// Status.Replicas should go up from 2->4 even though we created 5-4=1 pod
 	rc.Status = api.ReplicationControllerStatus{Replicas: 4}
+	// These are set by default.
+	rc.Spec.Selector = rc.Spec.Template.Labels
+	rc.Labels = rc.Spec.Template.Labels
+
 	decRc := runtime.EncodeOrDie(testapi.Codec(), &rc)
-	fakeUpdateHandler.ValidateRequest(t, fmt.Sprintf("/api/"+testapi.Version()+"/replicationControllers/%s?namespace=%s", rc.Name, rc.Namespace), "PUT", &decRc)
+	fakeUpdateHandler.ValidateRequest(t, testapi.ResourcePathWithQueryParams(replicationControllerResourceName(), rc.Namespace, rc.Name), "PUT", &decRc)
 	validateSyncReplication(t, &fakePodControl, 1, 0)
 }
 
 type FakeWatcher struct {
 	w *watch.FakeWatcher
-	*client.Fake
+	*testclient.Fake
 }
 
 func TestWatchControllers(t *testing.T) {
 	fakeWatch := watch.NewFake()
-	client := &client.Fake{Watch: fakeWatch}
+	client := &testclient.Fake{Watch: fakeWatch}
 	manager := NewReplicationManager(client)
 	var testControllerSpec api.ReplicationController
 	received := make(chan struct{})
@@ -409,7 +378,75 @@ func TestWatchControllers(t *testing.T) {
 
 	select {
 	case <-received:
-	case <-time.After(10 * time.Millisecond):
+	case <-time.After(100 * time.Millisecond):
 		t.Errorf("Expected 1 call but got 0")
+	}
+}
+
+func TestActivePodFiltering(t *testing.T) {
+	podList := newPodList(5)
+	podList.Items[0].Status.Phase = api.PodSucceeded
+	podList.Items[1].Status.Phase = api.PodFailed
+	expectedNames := util.NewStringSet()
+	for _, pod := range podList.Items[2:] {
+		expectedNames.Insert(pod.Name)
+	}
+
+	got := filterActivePods(podList.Items)
+	gotNames := util.NewStringSet()
+	for _, pod := range got {
+		gotNames.Insert(pod.Name)
+	}
+	if expectedNames.Difference(gotNames).Len() != 0 || gotNames.Difference(expectedNames).Len() != 0 {
+		t.Errorf("expected %v, got %v", expectedNames.List(), gotNames.List())
+	}
+}
+
+func TestSortingActivePods(t *testing.T) {
+	numPods := 5
+	podList := newPodList(numPods)
+	pods := make([]*api.Pod, len(podList.Items))
+	for i := range podList.Items {
+		pods[i] = &podList.Items[i]
+	}
+	// pods[0] is not scheduled yet.
+	pods[0].Spec.Host = ""
+	pods[0].Status.Phase = api.PodPending
+	// pods[1] is scheduled but pending.
+	pods[1].Spec.Host = "bar"
+	pods[1].Status.Phase = api.PodPending
+	// pods[2] is unknown.
+	pods[2].Spec.Host = "foo"
+	pods[2].Status.Phase = api.PodUnknown
+	// pods[3] is running but not ready.
+	pods[3].Spec.Host = "foo"
+	pods[3].Status.Phase = api.PodRunning
+	// pods[4] is running and ready.
+	pods[4].Spec.Host = "foo"
+	pods[4].Status.Phase = api.PodRunning
+	pods[4].Status.Conditions = []api.PodCondition{{Type: api.PodReady, Status: api.ConditionTrue}}
+
+	getOrder := func(pods []*api.Pod) []string {
+		names := make([]string, len(pods))
+		for i := range pods {
+			names[i] = pods[i].Name
+		}
+		return names
+	}
+
+	expected := getOrder(pods)
+
+	for i := 0; i < 20; i++ {
+		idx := rand.Perm(numPods)
+		randomizedPods := make([]*api.Pod, numPods)
+		for j := 0; j < numPods; j++ {
+			randomizedPods[j] = pods[idx[j]]
+		}
+		sort.Sort(activePods(randomizedPods))
+		actual := getOrder(randomizedPods)
+
+		if !reflect.DeepEqual(actual, expected) {
+			t.Errorf("expected %v, got %v", expected, actual)
+		}
 	}
 }

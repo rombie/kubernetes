@@ -17,6 +17,7 @@ limitations under the License.
 package cadvisor
 
 import (
+	"github.com/google/cadvisor/events"
 	cadvisorApi "github.com/google/cadvisor/info/v1"
 	cadvisorApiV2 "github.com/google/cadvisor/info/v2"
 	"github.com/stretchr/testify/mock"
@@ -34,6 +35,11 @@ func (c *Mock) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest)
 	return args.Get(0).(*cadvisorApi.ContainerInfo), args.Error(1)
 }
 
+func (c *Mock) SubcontainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (map[string]*cadvisorApi.ContainerInfo, error) {
+	args := c.Called(name, req)
+	return args.Get(0).(map[string]*cadvisorApi.ContainerInfo), args.Error(1)
+}
+
 // DockerContainer is a mock implementation of Interface.DockerContainer.
 func (c *Mock) DockerContainer(name string, req *cadvisorApi.ContainerInfoRequest) (cadvisorApi.ContainerInfo, error) {
 	args := c.Called(name, req)
@@ -46,7 +52,17 @@ func (c *Mock) MachineInfo() (*cadvisorApi.MachineInfo, error) {
 	return args.Get(0).(*cadvisorApi.MachineInfo), args.Error(1)
 }
 
+func (c *Mock) VersionInfo() (*cadvisorApi.VersionInfo, error) {
+	args := c.Called()
+	return args.Get(0).(*cadvisorApi.VersionInfo), args.Error(1)
+}
+
 func (c *Mock) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
 	args := c.Called()
 	return args.Get(0).(cadvisorApiV2.FsInfo), args.Error(1)
+}
+
+func (c *Mock) GetPastEvents(request *events.Request) ([]*cadvisorApi.Event, error) {
+	args := c.Called()
+	return args.Get(0).([]*cadvisorApi.Event), args.Error(1)
 }

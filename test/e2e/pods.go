@@ -19,7 +19,6 @@ package e2e
 import (
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
@@ -57,7 +56,7 @@ func runLivenessTest(c *client.Client, podDescr *api.Pod) {
 	By("checking the pod's current state and verifying that restartCount is present")
 	pod, err := c.Pods(ns).Get(podDescr.Name)
 	expectNoError(err, fmt.Sprintf("getting pod %s in namespace %s", podDescr.Name, ns))
-	initialRestartCount := pod.Status.Info["liveness"].RestartCount
+	initialRestartCount := api.GetExistingContainerStatus(pod.Status.ContainerStatuses, "liveness").RestartCount
 	By(fmt.Sprintf("Initial restart count of pod %s is %d", podDescr.Name, initialRestartCount))
 
 	// Wait for at most 48 * 5 = 240s = 4 minutes until restartCount is incremented
@@ -67,7 +66,7 @@ func runLivenessTest(c *client.Client, podDescr *api.Pod) {
 		time.Sleep(5 * time.Second)
 		pod, err = c.Pods(ns).Get(podDescr.Name)
 		expectNoError(err, fmt.Sprintf("getting pod %s", podDescr.Name))
-		restartCount := pod.Status.Info["liveness"].RestartCount
+		restartCount := api.GetExistingContainerStatus(pod.Status.ContainerStatuses, "liveness").RestartCount
 		By(fmt.Sprintf("Restart count of pod %s in namespace %s is now %d", podDescr.Name, ns, restartCount))
 		if restartCount > initialRestartCount {
 			By(fmt.Sprintf("Restart count of pod %s in namespace %s increased from %d to %d during the test", podDescr.Name, ns, initialRestartCount, restartCount))
@@ -81,6 +80,40 @@ func runLivenessTest(c *client.Client, podDescr *api.Pod) {
 	}
 }
 
+// testHostIP tests that a pod gets a host IP
+func testHostIP(c *client.Client, pod *api.Pod) {
+	ns := "e2e-test-" + string(util.NewUUID())
+	podClient := c.Pods(ns)
+	By("creating pod")
+	defer podClient.Delete(pod.Name)
+	_, err := podClient.Create(pod)
+	if err != nil {
+		Fail(fmt.Sprintf("Failed to create pod: %v", err))
+	}
+	By("ensuring that pod is running and has a hostIP")
+	// Wait for the pods to enter the running state. Waiting loops until the pods
+	// are running so non-running pods cause a timeout for this test.
+	err = waitForPodRunningInNamespace(c, pod.Name, ns)
+	Expect(err).NotTo(HaveOccurred())
+	// Try to make sure we get a hostIP for each pod.
+	hostIPTimeout := 2 * time.Minute
+	t := time.Now()
+	for {
+		p, err := podClient.Get(pod.Name)
+		Expect(err).NotTo(HaveOccurred())
+		if p.Status.HostIP != "" {
+			Logf("Pod %s has hostIP: %s", p.Name, p.Status.HostIP)
+			break
+		}
+		if time.Since(t) >= hostIPTimeout {
+			Failf("Gave up waiting for hostIP of pod %s after %v seconds",
+				p.Name, time.Since(t).Seconds())
+		}
+		Logf("Retrying to get the hostIP of pod %s", p.Name)
+		time.Sleep(5 * time.Second)
+	}
+}
+
 var _ = Describe("Pods", func() {
 	var c *client.Client
 
@@ -90,6 +123,22 @@ var _ = Describe("Pods", func() {
 		expectNoError(err)
 	})
 
+	PIt("should get a host IP", func() {
+		name := "pod-hostip-" + string(util.NewUUID())
+		testHostIP(c, &api.Pod{
+			ObjectMeta: api.ObjectMeta{
+				Name: name,
+			},
+			Spec: api.PodSpec{
+				Containers: []api.Container{
+					{
+						Name:  "test",
+						Image: "gcr.io/google_containers/pause",
+					},
+				},
+			},
+		})
+	})
 	It("should be submitted and removed", func() {
 		podClient := c.Pods(api.NamespaceDefault)
 
@@ -108,7 +157,7 @@ var _ = Describe("Pods", func() {
 				Containers: []api.Container{
 					{
 						Name:  "nginx",
-						Image: "dockerfile/nginx",
+						Image: "gcr.io/google_containers/nginx:1.7.9",
 						Ports: []api.ContainerPort{{ContainerPort: 80}},
 						LivenessProbe: &api.Probe{
 							Handler: api.Handler{
@@ -125,7 +174,7 @@ var _ = Describe("Pods", func() {
 		}
 
 		By("setting up watch")
-		pods, err := podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})))
+		pods, err := podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})), fields.Everything())
 		if err != nil {
 			Fail(fmt.Sprintf("Failed to query for pods: %v", err))
 		}
@@ -147,7 +196,7 @@ var _ = Describe("Pods", func() {
 		}
 
 		By("verifying the pod is in kubernetes")
-		pods, err = podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})))
+		pods, err = podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})), fields.Everything())
 		if err != nil {
 			Fail(fmt.Sprintf("Failed to query for pods: %v", err))
 		}
@@ -165,7 +214,7 @@ var _ = Describe("Pods", func() {
 
 		By("deleting the pod")
 		podClient.Delete(pod.Name)
-		pods, err = podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})))
+		pods, err = podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})), fields.Everything())
 		if err != nil {
 			Fail(fmt.Sprintf("Failed to delete pod: %v", err))
 		}
@@ -208,7 +257,7 @@ var _ = Describe("Pods", func() {
 				Containers: []api.Container{
 					{
 						Name:  "nginx",
-						Image: "dockerfile/nginx",
+						Image: "gcr.io/google_containers/nginx:1.7.9",
 						Ports: []api.ContainerPort{{ContainerPort: 80}},
 						LivenessProbe: &api.Probe{
 							Handler: api.Handler{
@@ -237,7 +286,7 @@ var _ = Describe("Pods", func() {
 		expectNoError(waitForPodRunning(c, pod.Name))
 
 		By("verifying the pod is in kubernetes")
-		pods, err := podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})))
+		pods, err := podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})), fields.Everything())
 		Expect(len(pods.Items)).To(Equal(1))
 
 		By("retrieving the pod")
@@ -260,7 +309,7 @@ var _ = Describe("Pods", func() {
 		expectNoError(waitForPodRunning(c, pod.Name))
 
 		By("verifying the updated pod is in kubernetes")
-		pods, err = podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})))
+		pods, err = podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})), fields.Everything())
 		Expect(len(pods.Items)).To(Equal(1))
 		fmt.Println("pod update OK")
 	})
@@ -278,7 +327,7 @@ var _ = Describe("Pods", func() {
 				Containers: []api.Container{
 					{
 						Name:  "srv",
-						Image: "kubernetes/serve_hostname",
+						Image: "gcr.io/google_containers/serve_hostname:1.1",
 						Ports: []api.ContainerPort{{ContainerPort: 9376}},
 					},
 				},
@@ -307,8 +356,10 @@ var _ = Describe("Pods", func() {
 				},
 			},
 			Spec: api.ServiceSpec{
-				Port:       8765,
-				TargetPort: util.NewIntOrStringFromInt(8080),
+				Ports: []api.ServicePort{{
+					Port:       8765,
+					TargetPort: util.NewIntOrStringFromInt(8080),
+				}},
 				Selector: map[string]string{
 					"name": serverName,
 				},
@@ -320,65 +371,26 @@ var _ = Describe("Pods", func() {
 			Fail(fmt.Sprintf("Failed to create service: %v", err))
 		}
 
-		// TODO: we don't have a way to wait for a service to be "running".  // If this proves flaky, then we will need to retry the clientPod or insert a sleep.
-
 		// Make a client pod that verifies that it has the service environment variables.
-		clientName := "client-envvars-" + string(util.NewUUID())
-		clientPod := &api.Pod{
+		podName := "client-envvars-" + string(util.NewUUID())
+		pod := &api.Pod{
 			ObjectMeta: api.ObjectMeta{
-				Name:   clientName,
-				Labels: map[string]string{"name": clientName},
+				Name:   podName,
+				Labels: map[string]string{"name": podName},
 			},
 			Spec: api.PodSpec{
 				Containers: []api.Container{
 					{
 						Name:    "env3cont",
-						Image:   "busybox",
-						Command: []string{"sh", "-c", "env; sleep 600"},
+						Image:   "gcr.io/google_containers/busybox",
+						Command: []string{"sh", "-c", "env"},
 					},
 				},
 				RestartPolicy: api.RestartPolicyNever,
 			},
 		}
-		defer c.Pods(api.NamespaceDefault).Delete(clientPod.Name)
-		_, err = c.Pods(api.NamespaceDefault).Create(clientPod)
-		if err != nil {
-			Fail(fmt.Sprintf("Failed to create pod: %v", err))
-		}
 
-		expectNoError(waitForPodRunning(c, clientPod.Name))
-
-		// Grab its logs.  Get host first.
-		clientPodStatus, err := c.Pods(api.NamespaceDefault).Get(clientPod.Name)
-		if err != nil {
-			Fail(fmt.Sprintf("Failed to get clientPod to know host: %v", err))
-		}
-		By(fmt.Sprintf("Trying to get logs from host %s pod %s container %s: %v",
-			clientPodStatus.Status.Host, clientPodStatus.Name, clientPodStatus.Spec.Containers[0].Name, err))
-		var logs []byte
-		start := time.Now()
-
-		// Sometimes the actual containers take a second to get started, try to get logs for 60s
-		for time.Now().Sub(start) < (60 * time.Second) {
-			logs, err = c.Get().
-				Prefix("proxy").
-				Resource("minions").
-				Name(clientPodStatus.Status.Host).
-				Suffix("containerLogs", api.NamespaceDefault, clientPodStatus.Name, clientPodStatus.Spec.Containers[0].Name).
-				Do().
-				Raw()
-			fmt.Sprintf("clientPod logs:%v\n", string(logs))
-			By(fmt.Sprintf("clientPod logs:%v\n", string(logs)))
-			if strings.Contains(string(logs), "Internal Error") {
-				By(fmt.Sprintf("Failed to get logs from host %s pod %s container %s: %v",
-					clientPodStatus.Status.Host, clientPodStatus.Name, clientPodStatus.Spec.Containers[0].Name, string(logs)))
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			break
-		}
-
-		toFind := []string{
+		testContainerOutput("service env", c, pod, []string{
 			"FOOSERVICE_SERVICE_HOST=",
 			"FOOSERVICE_SERVICE_PORT=",
 			"FOOSERVICE_PORT=",
@@ -386,13 +398,7 @@ var _ = Describe("Pods", func() {
 			"FOOSERVICE_PORT_8765_TCP_PROTO=",
 			"FOOSERVICE_PORT_8765_TCP=",
 			"FOOSERVICE_PORT_8765_TCP_ADDR=",
-		}
-
-		for _, m := range toFind {
-			Expect(string(logs)).To(ContainSubstring(m), "%q in client env vars", m)
-		}
-
-		// We could try a wget the service from the client pod.  But services.sh e2e test covers that pretty well.
+		})
 	})
 
 	It("should be restarted with a docker exec \"cat /tmp/health\" liveness probe", func() {
@@ -405,7 +411,7 @@ var _ = Describe("Pods", func() {
 				Containers: []api.Container{
 					{
 						Name:    "liveness",
-						Image:   "busybox",
+						Image:   "gcr.io/google_containers/busybox",
 						Command: []string{"/bin/sh", "-c", "echo ok >/tmp/health; sleep 10; echo fail >/tmp/health; sleep 600"},
 						LivenessProbe: &api.Probe{
 							Handler: api.Handler{
@@ -431,7 +437,7 @@ var _ = Describe("Pods", func() {
 				Containers: []api.Container{
 					{
 						Name:    "liveness",
-						Image:   "kubernetes/liveness",
+						Image:   "gcr.io/google_containers/liveness",
 						Command: []string{"/server"},
 						LivenessProbe: &api.Probe{
 							Handler: api.Handler{
@@ -477,7 +483,7 @@ var _ = Describe("Pods", func() {
 					Containers: []api.Container{
 						{
 							Name:  "nginx",
-							Image: "dockerfile/nginx",
+							Image: "nginx",
 						},
 					},
 				},
@@ -549,7 +555,7 @@ var _ = Describe("Pods", func() {
 					Containers: []api.Container{
 						{
 							Name:  "nginx",
-							Image: "dockerfile/nginx",
+							Image: "nginx",
 							Ports: []api.Port{{ContainerPort: 80}},
 						},
 					},

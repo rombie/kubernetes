@@ -20,9 +20,14 @@
 # config-default.sh.
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
 source "${KUBE_ROOT}/cluster/aws/${KUBE_CONFIG_FILE-"config-default.sh"}"
+source "${KUBE_ROOT}/cluster/common.sh"
 
-export AWS_DEFAULT_REGION=${ZONE}
+# This removes the final character in bash (somehow)
+AWS_REGION=${ZONE%?}
+
+export AWS_DEFAULT_REGION=${AWS_REGION}
 AWS_CMD="aws --output json ec2"
+AWS_ELB_CMD="aws --output json elb"
 
 MASTER_INTERNAL_IP=172.20.0.9
 
@@ -32,12 +37,12 @@ function json_val {
 
 # TODO (ayurchuk) Refactor the get_* functions to use filters
 # TODO (bburns) Parameterize this for multiple cluster per project
-function get_instance_ids {
-  python -c "import json,sys; lst = [str(instance['InstanceId']) for reservation in json.load(sys.stdin)['Reservations'] for instance in reservation['Instances'] for tag in instance.get('Tags', []) if tag['Value'].startswith('${MASTER_TAG}') or tag['Value'].startswith('${MINION_TAG}')]; print ' '.join(lst)"
-}
 
 function get_vpc_id {
-  python -c 'import json,sys; lst = [str(vpc["VpcId"]) for vpc in json.load(sys.stdin)["Vpcs"] for tag in vpc.get("Tags", []) if tag["Value"] == "kubernetes-vpc"]; print "".join(lst)'
+  $AWS_CMD --output text describe-vpcs \
+           --filters Name=tag:Name,Values=kubernetes-vpc \
+                     Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
+           --query Vpcs[].VpcId
 }
 
 function get_subnet_id {
@@ -52,8 +57,10 @@ function get_route_table_id {
   python -c "import json,sys; lst = [str(route_table['RouteTableId']) for route_table in json.load(sys.stdin)['RouteTables'] if route_table['VpcId'] == '$1']; print ''.join(lst)"
 }
 
-function get_sec_group_id {
-  python -c 'import json,sys; lst = [str(group["GroupId"]) for group in json.load(sys.stdin)["SecurityGroups"] if group["GroupName"] == "kubernetes-sec-group"]; print "".join(lst)'
+function get_elbs_in_vpc {
+ # ELB doesn't seem to be on the same platform as the rest of AWS; doesn't support filtering
+  $AWS_ELB_CMD describe-load-balancers | \
+    python -c "import json,sys; lst = [str(lb['LoadBalancerName']) for lb in json.load(sys.stdin)['LoadBalancerDescriptions'] if lb['VPCId'] == '$1']; print '\n'.join(lst)"
 }
 
 function expect_instance_states {
@@ -63,7 +70,9 @@ function expect_instance_states {
 function get_instance_public_ip {
   local tagName=$1
   $AWS_CMD --output text describe-instances \
-    --filters Name=tag:Name,Values=${tagName} Name=instance-state-name,Values=running \
+    --filters Name=tag:Name,Values=${tagName} \
+              Name=instance-state-name,Values=running \
+              Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
     --query Reservations[].Instances[].NetworkInterfaces[0].Association.PublicIp
 }
 
@@ -87,7 +96,7 @@ function detect-minions () {
     echo "Found ${MINION_NAMES[$i]} at ${minion_ip}"
     KUBE_MINION_IP_ADDRESSES+=("${minion_ip}")
   done
-  if [ -z "$KUBE_MINION_IP_ADDRESSES" ]; then
+  if [[ -z "$KUBE_MINION_IP_ADDRESSES" ]]; then
     echo "Could not detect Kubernetes minion nodes.  Make sure you've launched a cluster with 'kube-up.sh'"
     exit 1
   fi
@@ -102,7 +111,7 @@ function detect-image () {
   # See here: http://cloud-images.ubuntu.com/locator/ec2/ for other images
   # This will need to be updated from time to time as amis are deprecated
   if [[ -z "${AWS_IMAGE-}" ]]; then
-    case "${ZONE}" in
+    case "${AWS_REGION}" in
       ap-northeast-1)
         AWS_IMAGE=ami-93876e93
         ;;
@@ -156,7 +165,7 @@ function detect-image () {
 
 # Verify prereqs
 function verify-prereqs {
-  if [ "$(which aws)" == "" ]; then
+  if [[ "$(which aws)" == "" ]]; then
     echo "Can't find aws in PATH, please fix and retry."
     exit 1
   fi
@@ -233,9 +242,10 @@ function upload-server-tars() {
     aws s3 mb "s3://${AWS_S3_BUCKET}" --region ${AWS_S3_REGION}
   fi
 
-  local s3_url_base=https://s3-${AWS_S3_REGION}.amazonaws.com
-  if [[ "${AWS_S3_REGION}" == "us-east-1" ]]; then
-    # us-east-1 does not follow the pattern
+  local s3_bucket_location=$(aws --output text s3api get-bucket-location --bucket ${AWS_S3_BUCKET})
+  local s3_url_base=https://s3-${s3_bucket_location}.amazonaws.com
+  if [[ "${s3_bucket_location}" == "None" ]]; then
+    # "US Classic" does not follow the pattern
     s3_url_base=https://s3.amazonaws.com
   fi
 
@@ -256,7 +266,7 @@ function upload-server-tars() {
 
 
 # Ensure that we have a password created for validating to the master.  Will
-# read from the kubernetes auth-file for the current context if available.
+# read from kubeconfig for the current context if available.
 #
 # Assumed vars
 #   KUBE_ROOT
@@ -265,17 +275,11 @@ function upload-server-tars() {
 #   KUBE_USER
 #   KUBE_PASSWORD
 function get-password {
-  # go template to extract the auth-path of the current-context user
-  # Note: we save dot ('.') to $dot because the 'with' action overrides dot
-  local template='{{$dot := .}}{{with $ctx := index $dot "current-context"}}{{$user := index $dot "contexts" $ctx "user"}}{{index $dot "users" $user "auth-path"}}{{end}}'
-  local file=$("${KUBE_ROOT}/cluster/kubectl.sh" config view -o template --template="${template}")
-  if [[ ! -z "$file" && -r "$file" ]]; then
-    KUBE_USER=$(cat "$file" | python -c 'import json,sys;print json.load(sys.stdin)["User"]')
-    KUBE_PASSWORD=$(cat "$file" | python -c 'import json,sys;print json.load(sys.stdin)["Password"]')
-    return
+  get-kubeconfig-basicauth
+  if [[ -z "${KUBE_USER}" || -z "${KUBE_PASSWORD}" ]]; then
+    KUBE_USER=admin
+    KUBE_PASSWORD=$(python -c 'import string,random; print "".join(random.SystemRandom().choice(string.ascii_letters + string.digits) for _ in range(16))')
   fi
-  KUBE_USER=admin
-  KUBE_PASSWORD=$(python -c 'import string,random; print "".join(random.SystemRandom().choice(string.ascii_letters + string.digits) for _ in range(16))')
 }
 
 # Adds a tag to an AWS resource
@@ -327,6 +331,21 @@ function ensure-iam-profiles {
   }
 }
 
+# Wait for instance to be in running state
+function wait-for-instance-running {
+  instance_id=$1
+  while true; do
+    instance_state=$($AWS_CMD describe-instances --instance-ids $instance_id | expect_instance_states running)
+    if [[ "$instance_state" == "" ]]; then
+      break
+    else
+      echo "Waiting for instance ${instance_id} to spawn"
+      echo "Sleeping for 3 seconds..."
+      sleep 3
+    fi
+  done
+}
+
 function kube-up {
   find-release-tars
   upload-server-tars
@@ -341,36 +360,37 @@ function kube-up {
   local htpasswd
   htpasswd=$(cat "${KUBE_TEMP}/htpasswd")
 
-  if [ ! -f $AWS_SSH_KEY ]; then
-    ssh-keygen -f $AWS_SSH_KEY -N ''
+  if [[ ! -f "$AWS_SSH_KEY" ]]; then
+    ssh-keygen -f "$AWS_SSH_KEY" -N ''
   fi
 
   detect-image
 
-  $AWS_CMD import-key-pair --key-name kubernetes --public-key-material file://$AWS_SSH_KEY.pub > $LOG 2>&1 || true
+  $AWS_CMD import-key-pair --key-name kubernetes --public-key-material "file://$AWS_SSH_KEY.pub" > $LOG 2>&1 || true
 
-  VPC_ID=$($AWS_CMD describe-vpcs | get_vpc_id)
+  VPC_ID=$(get_vpc_id)
 
-  if [ -z "$VPC_ID" ]; then
+  if [[ -z "$VPC_ID" ]]; then
 	  echo "Creating vpc."
 	  VPC_ID=$($AWS_CMD create-vpc --cidr-block 172.20.0.0/16 | json_val '["Vpc"]["VpcId"]')
 	  $AWS_CMD modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-support '{"Value": true}' > $LOG
 	  $AWS_CMD modify-vpc-attribute --vpc-id $VPC_ID --enable-dns-hostnames '{"Value": true}' > $LOG
 	  add-tag $VPC_ID Name kubernetes-vpc
+	  add-tag $VPC_ID KubernetesCluster ${CLUSTER_ID}
   fi
 
   echo "Using VPC $VPC_ID"
 
   SUBNET_ID=$($AWS_CMD describe-subnets | get_subnet_id $VPC_ID)
-  if [ -z "$SUBNET_ID" ]; then
+  if [[ -z "$SUBNET_ID" ]]; then
 	  echo "Creating subnet."
-	  SUBNET_ID=$($AWS_CMD create-subnet --cidr-block 172.20.0.0/24 --vpc-id $VPC_ID | json_val '["Subnet"]["SubnetId"]')
+	  SUBNET_ID=$($AWS_CMD create-subnet --cidr-block 172.20.0.0/24 --vpc-id $VPC_ID --availability-zone ${ZONE} | json_val '["Subnet"]["SubnetId"]')
   fi
 
   echo "Using subnet $SUBNET_ID"
 
   IGW_ID=$($AWS_CMD describe-internet-gateways | get_igw_id $VPC_ID)
-  if [ -z "$IGW_ID" ]; then
+  if [[ -z "$IGW_ID" ]]; then
 	  echo "Creating Internet Gateway."
 	  IGW_ID=$($AWS_CMD create-internet-gateway | json_val '["InternetGateway"]["InternetGatewayId"]')
 	  $AWS_CMD attach-internet-gateway --internet-gateway-id $IGW_ID --vpc-id $VPC_ID > $LOG
@@ -388,9 +408,13 @@ function kube-up {
 
   echo "Using Route Table $ROUTE_TABLE_ID"
 
-  SEC_GROUP_ID=$($AWS_CMD describe-security-groups | get_sec_group_id)
+  SEC_GROUP_ID=$($AWS_CMD --output text describe-security-groups \
+                          --filters Name=vpc-id,Values=$VPC_ID \
+                                    Name=group-name,Values=kubernetes-sec-group \
+                          --query SecurityGroups[].GroupId \
+                    | tr "\t" "\n")
 
-  if [ -z "$SEC_GROUP_ID" ]; then
+  if [[ -z "$SEC_GROUP_ID" ]]; then
 	  echo "Creating security group."
 	  SEC_GROUP_ID=$($AWS_CMD create-security-group --group-name kubernetes-sec-group --description kubernetes-sec-group --vpc-id $VPC_ID | json_val '["GroupId"]')
 	  $AWS_CMD authorize-security-group-ingress --group-id $SEC_GROUP_ID --protocol -1 --port all --cidr 0.0.0.0/0 > $LOG
@@ -406,7 +430,7 @@ function kube-up {
     echo "readonly NODE_INSTANCE_PREFIX='${INSTANCE_PREFIX}-minion'"
     echo "readonly SERVER_BINARY_TAR_URL='${SERVER_BINARY_TAR_URL}'"
     echo "readonly SALT_TAR_URL='${SALT_TAR_URL}'"
-    echo "readonly AWS_ZONE='${ZONE}'"
+    echo "readonly ZONE='${ZONE}'"
     echo "readonly MASTER_HTPASSWD='${htpasswd}'"
     echo "readonly PORTAL_NET='${PORTAL_NET}'"
     echo "readonly ENABLE_CLUSTER_MONITORING='${ENABLE_CLUSTER_MONITORING:-false}'"
@@ -419,7 +443,8 @@ function kube-up {
     echo "readonly DNS_REPLICAS='${DNS_REPLICAS:-}'"
     echo "readonly DNS_SERVER_IP='${DNS_SERVER_IP:-}'"
     echo "readonly DNS_DOMAIN='${DNS_DOMAIN:-}'"
-    echo "readonly ADMISSION_CONTROL='${ADMISSION_CONTROL:-}'"    
+    echo "readonly ADMISSION_CONTROL='${ADMISSION_CONTROL:-}'"
+    echo "readonly MASTER_IP_RANGE='${MASTER_IP_RANGE:-}'"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/common.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/format-disks.sh"
     grep -v "^#" "${KUBE_ROOT}/cluster/aws/templates/create-dynamic-salt-files.sh"
@@ -440,6 +465,7 @@ function kube-up {
     --user-data file://${KUBE_TEMP}/master-start.sh | json_val '["Instances"][0]["InstanceId"]')
   add-tag $master_id Name $MASTER_NAME
   add-tag $master_id Role $MASTER_TAG
+  add-tag $master_id KubernetesCluster ${CLUSTER_ID}
 
   echo "Waiting for master to be ready"
 
@@ -459,8 +485,13 @@ function kube-up {
     else
       KUBE_MASTER=${MASTER_NAME}
       KUBE_MASTER_IP=${ip}
-
       echo -e " ${color_green}[master running @${KUBE_MASTER_IP}]${color_norm}"
+
+      # We are not able to add a route to the instance until that instance is in "running" state.
+      wait-for-instance-running $master_id
+      sleep 10
+      $AWS_CMD create-route --route-table-id $ROUTE_TABLE_ID --destination-cidr-block ${MASTER_IP_RANGE} --instance-id $master_id > $LOG
+
       break
     fi
     echo -e " ${color_yellow}[master not working yet]${color_norm}"
@@ -473,7 +504,7 @@ function kube-up {
   while true; do
     echo -n Attempt "$(($attempt+1))" to check for salt-master
     local output
-    output=$(ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${KUBE_MASTER_IP} pgrep salt-master 2> $LOG) || output=""
+    output=$(ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${KUBE_MASTER_IP} pgrep salt-master 2> $LOG) || output=""
     if [[ -z "${output}" ]]; then
       if (( attempt > 30 )); then
         echo
@@ -491,7 +522,7 @@ function kube-up {
     sleep 10
   done
 
-
+  MINION_IDS=()
   for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
     echo "Starting Minion (${MINION_NAMES[$i]})"
     (
@@ -516,26 +547,22 @@ function kube-up {
 
     add-tag $minion_id Name ${MINION_NAMES[$i]}
     add-tag $minion_id Role $MINION_TAG
+    add-tag $minion_id KubernetesCluster ${CLUSTER_ID}
 
-    sleep 3
-    $AWS_CMD modify-instance-attribute --instance-id $minion_id --source-dest-check '{"Value": false}' > $LOG
+    MINION_IDS[$i]=$minion_id
+  done
 
+  # Add routes to minions
+  for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
     # We are not able to add a route to the instance until that instance is in "running" state.
     # This is quite an ugly solution to this problem. In Bash 4 we could use assoc. arrays to do this for
     # all instances at once but we can't be sure we are running Bash 4.
-    while true; do
-      instance_state=$($AWS_CMD describe-instances --instance-ids $minion_id | expect_instance_states running)
-      if [[ "$instance_state" == "" ]]; then
-        echo "Minion ${MINION_NAMES[$i]} running"
-        sleep 10
-        $AWS_CMD create-route --route-table-id $ROUTE_TABLE_ID --destination-cidr-block ${MINION_IP_RANGES[$i]} --instance-id $minion_id > $LOG
-        break
-      else
-        echo "Waiting for minion ${MINION_NAMES[$i]} to spawn"
-        echo "Sleeping for 3 seconds..."
-        sleep 3
-      fi
-    done
+    minion_id=${MINION_IDS[$i]}
+    wait-for-instance-running $minion_id
+    echo "Minion ${MINION_NAMES[$i]} running"
+    sleep 10
+    $AWS_CMD modify-instance-attribute --instance-id $minion_id --source-dest-check '{"Value": false}' > $LOG
+    $AWS_CMD create-route --route-table-id $ROUTE_TABLE_ID --destination-cidr-block ${MINION_IP_RANGES[$i]} --instance-id $minion_id > $LOG
   done
 
   FAIL=0
@@ -560,7 +587,7 @@ function kube-up {
     sleep 10
   done
   echo "Re-running salt highstate"
-  ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${KUBE_MASTER_IP} sudo salt '*' state.highstate > $LOG
+  ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${KUBE_MASTER_IP} sudo salt '*' state.highstate > $LOG
 
   echo "Waiting for cluster initialization."
   echo
@@ -577,44 +604,23 @@ function kube-up {
 
   echo "Kubernetes cluster created."
 
-  local kube_cert="kubecfg.crt"
-  local kube_key="kubecfg.key"
-  local ca_cert="kubernetes.ca.crt"
   # TODO use token instead of kube_auth
-  local kube_auth="kubernetes_auth"
+  export KUBE_CERT="/tmp/$RANDOM-kubecfg.crt"
+  export KUBE_KEY="/tmp/$RANDOM-kubecfg.key"
+  export CA_CERT="/tmp/$RANDOM-kubernetes.ca.crt"
+  export CONTEXT="aws_${INSTANCE_PREFIX}"
 
   local kubectl="${KUBE_ROOT}/cluster/kubectl.sh"
-  local context="${INSTANCE_PREFIX}"
-  local user="${INSTANCE_PREFIX}-admin"
-  local config_dir="${HOME}/.kube/${context}"
 
   # TODO: generate ADMIN (and KUBELET) tokens and put those in the master's
   # config file.  Distribute the same way the htpasswd is done.
   (
-    mkdir -p "${config_dir}"
     umask 077
-    ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${KUBE_MASTER_IP} sudo cat /srv/kubernetes/kubecfg.crt >"${config_dir}/${kube_cert}" 2>$LOG
-    ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${KUBE_MASTER_IP} sudo cat /srv/kubernetes/kubecfg.key >"${config_dir}/${kube_key}" 2>$LOG
-    ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${KUBE_MASTER_IP} sudo cat /srv/kubernetes/ca.crt >"${config_dir}/${ca_cert}" 2>$LOG
+    ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" "ubuntu@${KUBE_MASTER_IP}" sudo cat /srv/kubernetes/kubecfg.crt >"${KUBE_CERT}" 2>"$LOG"
+    ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" "ubuntu@${KUBE_MASTER_IP}" sudo cat /srv/kubernetes/kubecfg.key >"${KUBE_KEY}" 2>"$LOG"
+    ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" "ubuntu@${KUBE_MASTER_IP}" sudo cat /srv/kubernetes/ca.crt >"${CA_CERT}" 2>"$LOG"
 
-    "${kubectl}" config set-cluster "${context}" --server="https://${KUBE_MASTER_IP}" --certificate-authority="${config_dir}/${ca_cert}" --global
-    "${kubectl}" config set-credentials "${user}" --auth-path="${config_dir}/${kube_auth}" --global
-    "${kubectl}" config set-context "${context}" --cluster="${context}" --user="${user}" --global
-    "${kubectl}" config use-context "${context}" --global
-
-    cat << EOF > "${config_dir}/${kube_auth}"
-{
-  "User": "$KUBE_USER",
-  "Password": "$KUBE_PASSWORD",
-  "CAFile": "${config_dir}/${ca_cert}",
-  "CertFile": "${config_dir}/${kube_cert}",
-  "KeyFile": "${config_dir}/${kube_key}"
-}
-EOF
-
-    chmod 0600 "${config_dir}/${kube_auth}" "${config_dir}/$kube_cert" \
-      "${config_dir}/${kube_key}" "${config_dir}/${ca_cert}"
-    echo "Wrote ${config_dir}/${kube_auth}"
+    create-kubeconfig
   )
 
   echo "Sanity checking cluster..."
@@ -633,7 +639,7 @@ EOF
         local minion_name=${MINION_NAMES[$i]}
         local minion_ip=${KUBE_MINION_IP_ADDRESSES[$i]}
         echo -n Attempt "$(($attempt+1))" to check Docker on node "${minion_name} @ ${minion_ip}" ...
-        local output=$(ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@$minion_ip sudo docker ps -a 2>/dev/null)
+        local output=$(ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@$minion_ip sudo docker ps -a 2>/dev/null)
         if [[ -z "${output}" ]]; then
           if (( attempt > 9 )); then
             echo
@@ -657,7 +663,7 @@ EOF
         fi
         echo -e " ${color_yellow}[not working yet]${color_norm}"
         # Start Docker, in case it failed to start.
-        ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@$$minion_ip sudo service docker start > $LOG 2>&1
+        ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@$minion_ip sudo service docker start > $LOG 2>&1
         attempt=$(($attempt+1))
         sleep 30
       done
@@ -668,31 +674,56 @@ EOF
   echo
   echo -e "${color_yellow}  https://${KUBE_MASTER_IP}"
   echo
-  echo -e "${color_green}The user name and password to use is located in ${config_dir}/${kube_auth}${color_norm}"
+  echo -e "${color_green}The user name and password to use is located in ${KUBECONFIG}.${color_norm}"
   echo
 }
 
 function kube-down {
-  instance_ids=$($AWS_CMD describe-instances | get_instance_ids)
-  if [[ -n ${instance_ids} ]]; then
-    $AWS_CMD terminate-instances --instance-ids $instance_ids > $LOG
-    echo "Waiting for instances deleted"
-    while true; do
-      instance_states=$($AWS_CMD describe-instances --instance-ids $instance_ids | expect_instance_states terminated)
-      if [[ "$instance_states" == "" ]]; then
-        echo "All instances terminated"
-        break
-      else
-        echo "Instances not yet terminated: $instance_states"
-        echo "Sleeping for 3 seconds..."
-        sleep 3
-      fi
-    done
-  fi
-
-  echo "Deleting VPC"
-  vpc_id=$($AWS_CMD describe-vpcs | get_vpc_id)
+  vpc_id=$(get_vpc_id)
   if [[ -n "${vpc_id}" ]]; then
+    local elb_ids=$(get_elbs_in_vpc ${vpc_id})
+    if [[ -n ${elb_ids} ]]; then
+      echo "Deleting ELBs in: ${vpc_id}"
+      for elb_id in ${elb_ids}; do
+        $AWS_ELB_CMD delete-load-balancer --load-balancer-name=${elb_id}
+      done
+
+      echo "Waiting for ELBs to be deleted"
+      while true; do
+        elb_ids=$(get_elbs_in_vpc ${vpc_id})
+        if [[ -z "$elb_ids"  ]]; then
+          echo "All ELBs deleted"
+          break
+        else
+          echo "ELBs not yet deleted: $elb_ids"
+          echo "Sleeping for 3 seconds..."
+          sleep 3
+        fi
+      done
+    fi
+
+    echo "Deleting instances in VPC: ${vpc_id}"
+    instance_ids=$($AWS_CMD --output text describe-instances \
+                            --filters Name=vpc-id,Values=${vpc_id} \
+                                      Name=tag:KubernetesCluster,Values=${CLUSTER_ID} \
+                            --query Reservations[].Instances[].InstanceId)
+    if [[ -n ${instance_ids} ]]; then
+      $AWS_CMD terminate-instances --instance-ids $instance_ids > $LOG
+      echo "Waiting for instances to be deleted"
+      while true; do
+        instance_states=$($AWS_CMD describe-instances --instance-ids $instance_ids | expect_instance_states terminated)
+        if [[ "$instance_states" == "" ]]; then
+          echo "All instances deleted"
+          break
+        else
+          echo "Instances not yet deleted: $instance_states"
+          echo "Sleeping for 3 seconds..."
+          sleep 3
+        fi
+      done
+    fi
+
+    echo "Deleting VPC: ${vpc_id}"
     default_sg_id=$($AWS_CMD --output text describe-security-groups \
                              --filters Name=vpc-id,Values=$vpc_id Name=group-name,Values=default \
                              --query SecurityGroups[].GroupId \
@@ -757,7 +788,7 @@ function kube-push {
     echo "echo Executing configuration"
     echo "sudo salt '*' mine.update"
     echo "sudo salt --force-color '*' state.highstate"
-  ) | ssh -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${KUBE_MASTER_IP} sudo bash
+  ) | ssh -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${KUBE_MASTER_IP} sudo bash
 
   get-password
 
@@ -804,13 +835,13 @@ function ssh-to-node {
   local cmd="$2"
 
   local ip=$(get_instance_public_ip ${node})
-  if [ -z "ip" ]; then
+  if [[ -z "$ip" ]]; then
     echo "Could not detect IP for ${node}."
     exit 1
   fi
 
   for try in $(seq 1 5); do
-    if ssh -oLogLevel=quiet -oStrictHostKeyChecking=no -i ${AWS_SSH_KEY} ubuntu@${ip} "${cmd}"; then
+    if ssh -oLogLevel=quiet -oStrictHostKeyChecking=no -i "${AWS_SSH_KEY}" ubuntu@${ip} "${cmd}"; then
       break
     fi
   done

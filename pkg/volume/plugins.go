@@ -29,6 +29,17 @@ import (
 	"github.com/golang/glog"
 )
 
+// VolumeOptions contains option information about a volume.
+//
+// Currently, this struct containers only a single field for the
+// rootcontext of the volume.  This is a temporary measure in order
+// to set the rootContext of tmpfs mounts correctly; it will be replaced
+// and expanded on by future SecurityContext work.
+type VolumeOptions struct {
+	// The rootcontext to use when performing mounts for a volume.
+	RootContext string
+}
+
 // VolumePlugin is an interface to volume plugins that can be used on a
 // kubernetes node (e.g. by kubelet) to instantiate and manage volumes.
 type VolumePlugin interface {
@@ -45,18 +56,26 @@ type VolumePlugin interface {
 	// CanSupport tests whether the plugin supports a given volume
 	// specification from the API.  The spec pointer should be considered
 	// const.
-	CanSupport(spec *api.Volume) bool
+	CanSupport(spec *Spec) bool
 
 	// NewBuilder creates a new volume.Builder from an API specification.
 	// Ownership of the spec pointer in *not* transferred.
 	// - spec: The api.Volume spec
 	// - podRef: a reference to the enclosing pod
-	NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (Builder, error)
+	NewBuilder(spec *Spec, podRef *api.ObjectReference, opts VolumeOptions) (Builder, error)
 
 	// NewCleaner creates a new volume.Cleaner from recoverable state.
 	// - name: The volume name, as per the api.Volume spec.
 	// - podUID: The UID of the enclosing pod
 	NewCleaner(name string, podUID types.UID) (Cleaner, error)
+}
+
+// PersistentVolumePlugin is an extended interface of VolumePlugin and is used
+// by volumes that want to provide long term persistence of data
+type PersistentVolumePlugin interface {
+	VolumePlugin
+	// GetAccessModes describes the ways a given volume can be accessed/mounted.
+	GetAccessModes() []api.AccessModeType
 }
 
 // VolumeHost is an interface that plugins can use to access the kubelet.
@@ -86,18 +105,41 @@ type VolumeHost interface {
 	// the provided spec.  This is used to implement volume plugins which
 	// "wrap" other plugins.  For example, the "secret" volume is
 	// implemented in terms of the "emptyDir" volume.
-	NewWrapperBuilder(spec *api.Volume, podRef *api.ObjectReference) (Builder, error)
+	NewWrapperBuilder(spec *Spec, podRef *api.ObjectReference, opts VolumeOptions) (Builder, error)
 
 	// NewWrapperCleaner finds an appropriate plugin with which to handle
 	// the provided spec.  See comments on NewWrapperBuilder for more
 	// context.
-	NewWrapperCleaner(spec *api.Volume, podUID types.UID) (Cleaner, error)
+	NewWrapperCleaner(spec *Spec, podUID types.UID) (Cleaner, error)
 }
 
 // VolumePluginMgr tracks registered plugins.
 type VolumePluginMgr struct {
 	mutex   sync.Mutex
 	plugins map[string]VolumePlugin
+}
+
+// Spec is an internal representation of a volume.  All API volume types translate to Spec.
+type Spec struct {
+	Name                   string
+	VolumeSource           api.VolumeSource
+	PersistentVolumeSource api.PersistentVolumeSource
+}
+
+// NewSpecFromVolume creates an Spec from an api.Volume
+func NewSpecFromVolume(vs *api.Volume) *Spec {
+	return &Spec{
+		Name:         vs.Name,
+		VolumeSource: vs.VolumeSource,
+	}
+}
+
+// NewSpecFromPersistentVolume creates an Spec from an api.PersistentVolume
+func NewSpecFromPersistentVolume(pv *api.PersistentVolume) *Spec {
+	return &Spec{
+		Name: pv.Name,
+		PersistentVolumeSource: pv.Spec.PersistentVolumeSource,
+	}
 }
 
 // InitPlugins initializes each plugin.  All plugins must have unique names.
@@ -133,7 +175,7 @@ func (pm *VolumePluginMgr) InitPlugins(plugins []VolumePlugin, host VolumeHost) 
 // FindPluginBySpec looks for a plugin that can support a given volume
 // specification.  If no plugins can support or more than one plugin can
 // support it, return error.
-func (pm *VolumePluginMgr) FindPluginBySpec(spec *api.Volume) (VolumePlugin, error) {
+func (pm *VolumePluginMgr) FindPluginBySpec(spec *Spec) (VolumePlugin, error) {
 	pm.mutex.Lock()
 	defer pm.mutex.Unlock()
 
@@ -174,17 +216,15 @@ func (pm *VolumePluginMgr) FindPluginByName(name string) (VolumePlugin, error) {
 	return pm.plugins[matches[0]], nil
 }
 
-// EscapePluginName converts a plugin name, which might contain a / into a
-// string that is safe to use on-disk.  This assumes that the input has already
-// been validates as a qualified name.  we use "~" rather than ":" here in case
-// we ever use a filesystem that doesn't allow ":".
-func EscapePluginName(in string) string {
-	return strings.Replace(in, "/", "~", -1)
-}
-
-// UnescapePluginName converts an escaped plugin name (as per EscapePluginName)
-// back to its normal form.  This assumes that the input has already been
-// validates as a qualified name.
-func UnescapePluginName(in string) string {
-	return strings.Replace(in, "~", "/", -1)
+// FindPluginByName fetches a plugin by name or by legacy name.  If no plugin
+// is found, returns error.
+func (pm *VolumePluginMgr) FindPersistentPluginByName(name string) (PersistentVolumePlugin, error) {
+	volumePlugin, err := pm.FindPluginByName(name)
+	if err != nil {
+		return nil, err
+	}
+	if persistentVolumePlugin, ok := volumePlugin.(PersistentVolumePlugin); ok {
+		return persistentVolumePlugin, nil
+	}
+	return nil, fmt.Errorf("no persistent volume plugin matched")
 }

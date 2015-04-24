@@ -37,12 +37,34 @@ func TestCanSupport(t *testing.T) {
 	if plug.Name() != "kubernetes.io/nfs" {
 		t.Errorf("Wrong name: %s", plug.Name())
 	}
-	if !plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{NFS: &api.NFSVolumeSource{}}}) {
+	if !plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{NFS: &api.NFSVolumeSource{}}}) {
 		t.Errorf("Expected true")
 	}
-	if plug.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{}}) {
+	if plug.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{}}) {
 		t.Errorf("Expected false")
 	}
+}
+
+func TestGetAccessModes(t *testing.T) {
+	plugMgr := volume.VolumePluginMgr{}
+	plugMgr.InitPlugins(ProbeVolumePlugins(), volume.NewFakeVolumeHost("/tmp/fake", nil, nil))
+
+	plug, err := plugMgr.FindPersistentPluginByName("kubernetes.io/nfs")
+	if err != nil {
+		t.Errorf("Can't find the plugin by name")
+	}
+	if !contains(plug.GetAccessModes(), api.ReadWriteOnce) || !contains(plug.GetAccessModes(), api.ReadOnlyMany) || !contains(plug.GetAccessModes(), api.ReadWriteMany) {
+		t.Errorf("Expected three AccessModeTypes:  %s, %s, and %s", api.ReadWriteOnce, api.ReadOnlyMany, api.ReadWriteMany)
+	}
+}
+
+func contains(modes []api.AccessModeType, mode api.AccessModeType) bool {
+	for _, m := range modes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
 }
 
 type fakeNFSMounter struct {
@@ -86,13 +108,13 @@ func TestPlugin(t *testing.T) {
 		VolumeSource: api.VolumeSource{NFS: &api.NFSVolumeSource{"localhost", "/tmp", false}},
 	}
 	fake := &fakeNFSMounter{}
-	builder, err := plug.(*nfsPlugin).newBuilderInternal(spec, &api.ObjectReference{UID: types.UID("poduid")}, fake)
+	builder, err := plug.(*nfsPlugin).newBuilderInternal(volume.NewSpecFromVolume(spec), &api.ObjectReference{UID: types.UID("poduid")}, fake)
 	volumePath := builder.GetPath()
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 	path := builder.GetPath()
 	if path != "/tmp/fake/pods/poduid/volumes/kubernetes.io~nfs/vol1" {
@@ -125,7 +147,7 @@ func TestPlugin(t *testing.T) {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 	if err := cleaner.TearDown(); err != nil {
 		t.Errorf("Expected success, got: %v", err)

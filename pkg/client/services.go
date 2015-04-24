@@ -17,9 +17,6 @@ limitations under the License.
 package client
 
 import (
-	"errors"
-	"fmt"
-
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
@@ -58,7 +55,7 @@ func (c *services) List(selector labels.Selector) (result *api.ServiceList, err 
 	err = c.r.Get().
 		Namespace(c.ns).
 		Resource("services").
-		LabelsSelectorParam(api.LabelSelectorQueryParam(c.r.APIVersion()), selector).
+		LabelsSelectorParam(selector).
 		Do().
 		Into(result)
 	return
@@ -66,10 +63,6 @@ func (c *services) List(selector labels.Selector) (result *api.ServiceList, err 
 
 // Get returns information about a particular service.
 func (c *services) Get(name string) (result *api.Service, err error) {
-	if len(name) == 0 {
-		return nil, errors.New("name is required parameter to Get")
-	}
-
 	result = &api.Service{}
 	err = c.r.Get().Namespace(c.ns).Resource("services").Name(name).Do().Into(result)
 	return
@@ -78,41 +71,19 @@ func (c *services) Get(name string) (result *api.Service, err error) {
 // Create creates a new service.
 func (c *services) Create(svc *api.Service) (result *api.Service, err error) {
 	result = &api.Service{}
-	// v1beta3 does not allow POST without a namespace.
-	needNamespace := !api.PreV1Beta3(c.r.APIVersion())
-	namespace := c.ns
-	if needNamespace && len(namespace) == 0 {
-		namespace = api.NamespaceDefault
-	}
-	err = c.r.Post().Namespace(namespace).Resource("services").Body(svc).Do().Into(result)
+	err = c.r.Post().Namespace(c.ns).Resource("services").Body(svc).Do().Into(result)
 	return
 }
 
 // Update updates an existing service.
 func (c *services) Update(svc *api.Service) (result *api.Service, err error) {
 	result = &api.Service{}
-	if len(svc.ResourceVersion) == 0 {
-		err = fmt.Errorf("invalid update object, missing resource version: %v", svc)
-		return
-	}
-	// v1beta3 does not allow PUT without a namespace.
-	needNamespace := !api.PreV1Beta3(c.r.APIVersion())
-	namespace := c.ns
-	if needNamespace && len(namespace) == 0 {
-		namespace = api.NamespaceDefault
-	}
-	err = c.r.Put().Namespace(namespace).Resource("services").Name(svc.Name).Body(svc).Do().Into(result)
+	err = c.r.Put().Namespace(c.ns).Resource("services").Name(svc.Name).Body(svc).Do().Into(result)
 	return
 }
 
 // Delete deletes an existing service.
 func (c *services) Delete(name string) error {
-	// v1beta3 does not allow DELETE without a namespace.
-	needNamespace := !api.PreV1Beta3(c.r.APIVersion())
-	namespace := c.ns
-	if needNamespace && len(namespace) == 0 {
-		namespace = api.NamespaceDefault
-	}
 	return c.r.Delete().Namespace(c.ns).Resource("services").Name(name).Do().Error()
 }
 
@@ -123,7 +94,7 @@ func (c *services) Watch(label labels.Selector, field fields.Selector, resourceV
 		Namespace(c.ns).
 		Resource("services").
 		Param("resourceVersion", resourceVersion).
-		LabelsSelectorParam(api.LabelSelectorQueryParam(c.r.APIVersion()), label).
-		FieldsSelectorParam(api.FieldSelectorQueryParam(c.r.APIVersion()), field).
+		LabelsSelectorParam(label).
+		FieldsSelectorParam(field).
 		Watch()
 }

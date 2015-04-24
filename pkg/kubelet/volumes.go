@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/golang/glog"
@@ -53,15 +54,15 @@ func (vh *volumeHost) GetKubeClient() client.Interface {
 	return vh.kubelet.kubeClient
 }
 
-func (vh *volumeHost) NewWrapperBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
-	b, err := vh.kubelet.newVolumeBuilderFromPlugins(spec, podRef)
+func (vh *volumeHost) NewWrapperBuilder(spec *volume.Spec, podRef *api.ObjectReference, opts volume.VolumeOptions) (volume.Builder, error) {
+	b, err := vh.kubelet.newVolumeBuilderFromPlugins(spec, podRef, opts)
 	if err == nil && b == nil {
 		return nil, errUnsupportedVolumeType
 	}
 	return b, nil
 }
 
-func (vh *volumeHost) NewWrapperCleaner(spec *api.Volume, podUID types.UID) (volume.Cleaner, error) {
+func (vh *volumeHost) NewWrapperCleaner(spec *volume.Spec, podUID types.UID) (volume.Cleaner, error) {
 	plugin, err := vh.kubelet.volumePluginMgr.FindPluginBySpec(spec)
 	if err != nil {
 		return nil, err
@@ -77,7 +78,7 @@ func (vh *volumeHost) NewWrapperCleaner(spec *api.Volume, podUID types.UID) (vol
 	return c, nil
 }
 
-func (kl *Kubelet) newVolumeBuilderFromPlugins(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
+func (kl *Kubelet) newVolumeBuilderFromPlugins(spec *volume.Spec, podRef *api.ObjectReference, opts volume.VolumeOptions) (volume.Builder, error) {
 	plugin, err := kl.volumePluginMgr.FindPluginBySpec(spec)
 	if err != nil {
 		return nil, fmt.Errorf("can't use volume plugins for %s: %v", spew.Sprintf("%#v", *spec), err)
@@ -86,7 +87,7 @@ func (kl *Kubelet) newVolumeBuilderFromPlugins(spec *api.Volume, podRef *api.Obj
 		// Not found but not an error
 		return nil, nil
 	}
-	builder, err := plugin.NewBuilder(spec, podRef)
+	builder, err := plugin.NewBuilder(spec, podRef, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to instantiate volume plugin for %s: %v", spew.Sprintf("%#v", *spec), err)
 	}
@@ -105,8 +106,14 @@ func (kl *Kubelet) mountExternalVolumes(pod *api.Pod) (volumeMap, error) {
 			return nil, err
 		}
 
+		rootContext, err := kl.getRootDirContext()
+		if err != nil {
+			return nil, err
+		}
+
 		// Try to use a plugin for this volume.
-		builder, err := kl.newVolumeBuilderFromPlugins(volSpec, podRef)
+		internal := volume.NewSpecFromVolume(volSpec)
+		builder, err := kl.newVolumeBuilderFromPlugins(internal, podRef, volume.VolumeOptions{rootContext})
 		if err != nil {
 			glog.Errorf("Could not create volume builder for pod %s: %v", pod.UID, err)
 			return nil, err
@@ -174,7 +181,7 @@ func (kl *Kubelet) getPodVolumesFromDisk() map[string]volume.Cleaner {
 }
 
 func (kl *Kubelet) newVolumeCleanerFromPlugins(kind string, name string, podUID types.UID) (volume.Cleaner, error) {
-	plugName := volume.UnescapePluginName(kind)
+	plugName := util.UnescapeQualifiedNameForDisk(kind)
 	plugin, err := kl.volumePluginMgr.FindPluginByName(plugName)
 	if err != nil {
 		// TODO: Maybe we should launch a cleanup of this dir?

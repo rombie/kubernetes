@@ -23,8 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta1"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
@@ -93,16 +92,20 @@ func TestExtractObj(t *testing.T) {
 
 func TestWatch(t *testing.T) {
 	client := newEtcdClient()
-	helper := tools.NewEtcdHelper(client, latest.Codec)
+	helper := tools.NewEtcdHelper(client, testapi.Codec())
 	withEtcdKey(func(key string) {
-		resp, err := client.Set(key, runtime.EncodeOrDie(v1beta1.Codec, &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}), 0)
+		resp, err := client.Set(key, runtime.EncodeOrDie(testapi.Codec(), &api.Pod{ObjectMeta: api.ObjectMeta{Name: "foo"}}), 0)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		expectedVersion := resp.Node.ModifiedIndex
 
 		// watch should load the object at the current index
-		w := helper.Watch(key, 0)
+		w, err := helper.Watch(key, 0, tools.Everything)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
 		event := <-w.ResultChan()
 		if event.Type != watch.Added || event.Object == nil {
 			t.Fatalf("expected first value to be set to ADDED, got %#v", event)

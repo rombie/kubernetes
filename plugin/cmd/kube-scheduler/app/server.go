@@ -26,8 +26,12 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd"
+	clientcmdapi "github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/healthz"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master/ports"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler"
@@ -37,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/plugin/pkg/scheduler/factory"
 
 	"github.com/golang/glog"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
 )
 
@@ -44,10 +49,11 @@ import (
 type SchedulerServer struct {
 	Port              int
 	Address           util.IP
-	ClientConfig      client.Config
 	AlgorithmProvider string
 	PolicyConfigFile  string
 	EnableProfiling   bool
+	Master            string
+	Kubeconfig        string
 }
 
 // NewSchedulerServer creates a new SchedulerServer with default parameters
@@ -64,29 +70,50 @@ func NewSchedulerServer() *SchedulerServer {
 func (s *SchedulerServer) AddFlags(fs *pflag.FlagSet) {
 	fs.IntVar(&s.Port, "port", s.Port, "The port that the scheduler's http service runs on")
 	fs.Var(&s.Address, "address", "The IP address to serve on (set to 0.0.0.0 for all interfaces)")
-	client.BindClientConfigFlags(fs, &s.ClientConfig)
-	fs.StringVar(&s.AlgorithmProvider, "algorithm_provider", s.AlgorithmProvider, "The scheduling algorithm provider to use")
+	fs.StringVar(&s.AlgorithmProvider, "algorithm_provider", s.AlgorithmProvider, "The scheduling algorithm provider to use, one of: "+factory.ListAlgorithmProviders())
 	fs.StringVar(&s.PolicyConfigFile, "policy_config_file", s.PolicyConfigFile, "File with scheduler policy configuration")
-	fs.BoolVar(&s.EnableProfiling, "profiling", false, "Enable profiling via web interface host:port/debug/pprof/")
+	fs.BoolVar(&s.EnableProfiling, "profiling", true, "Enable profiling via web interface host:port/debug/pprof/")
+	fs.StringVar(&s.Master, "master", s.Master, "The address of the Kubernetes API server (overrides any value in kubeconfig)")
+	fs.StringVar(&s.Kubeconfig, "kubeconfig", s.Kubeconfig, "Path to kubeconfig file with authorization and master location information.")
 }
 
 // Run runs the specified SchedulerServer.  This should never exit.
 func (s *SchedulerServer) Run(_ []string) error {
-	kubeClient, err := client.New(&s.ClientConfig)
+	if s.Kubeconfig == "" && s.Master == "" {
+		glog.Warningf("Neither --kubeconfig nor --master was specified.  Using default API client.  This might not work.")
+	}
+
+	// This creates a client, first loading any specified kubeconfig
+	// file, and then overriding the Master flag, if non-empty.
+	kubeconfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: s.Kubeconfig},
+		&clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: s.Master}}).ClientConfig()
+	if err != nil {
+		return err
+	}
+	kubeconfig.QPS = 20.0
+	kubeconfig.Burst = 100
+
+	kubeClient, err := client.New(kubeconfig)
 	if err != nil {
 		glog.Fatalf("Invalid API configuration: %v", err)
 	}
 
-	record.StartRecording(kubeClient.Events(""))
-
 	go func() {
+		mux := http.NewServeMux()
+		healthz.InstallHandler(mux)
 		if s.EnableProfiling {
-			mux := http.NewServeMux()
 			mux.HandleFunc("/debug/pprof/", pprof.Index)
 			mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		}
-		http.ListenAndServe(net.JoinHostPort(s.Address.String(), strconv.Itoa(s.Port)), nil)
+		mux.Handle("/metrics", prometheus.Handler())
+
+		server := &http.Server{
+			Addr:    net.JoinHostPort(s.Address.String(), strconv.Itoa(s.Port)),
+			Handler: mux,
+		}
+		glog.Fatal(server.ListenAndServe())
 	}()
 
 	configFactory := factory.NewConfigFactory(kubeClient)
@@ -94,6 +121,10 @@ func (s *SchedulerServer) Run(_ []string) error {
 	if err != nil {
 		glog.Fatalf("Failed to create scheduler configuration: %v", err)
 	}
+
+	eventBroadcaster := record.NewBroadcaster()
+	config.Recorder = eventBroadcaster.NewRecorder(api.EventSource{Component: "scheduler"})
+	eventBroadcaster.StartRecordingToSink(kubeClient.Events(""))
 
 	sched := scheduler.New(config)
 	sched.Run()

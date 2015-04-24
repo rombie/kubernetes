@@ -38,15 +38,14 @@
     - group: root
     - dir_mode: 755
     - file_mode: 644
-
-/etc/kubernetes/addons/fluentd-elasticsearch/es-controller.yaml:
-  file.managed:
-    - source: salt://kube-addons/fluentd-elasticsearch/es-controller.yaml.in
-    - template: jinja
-    - group: root
-    - dir_mode: 755
-    - makedirs: True
 {% endif %}
+
+/etc/kubernetes/kube-addons.sh:
+  file.managed:
+    - source: salt://kube-addons/kube-addons.sh
+    - user: root
+    - group: root
+    - mode: 755
 
 {% if grains['os_family'] == 'RedHat' %}
 
@@ -55,13 +54,6 @@
     - source: salt://kube-addons/kube-addons.service
     - user: root
     - group: root
-
-/etc/kubernetes/kube-addons.sh:
-  file.managed:
-    - source: salt://kube-addons/kube-addons.sh
-    - user: root
-    - group: root
-    - mode: 755
 
 {% else %}
 

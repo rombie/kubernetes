@@ -29,7 +29,7 @@ You can use the kube-version-change utility to convert config files between diff
 
 ```
 $ hack/build-go.sh cmd/kube-version-change
-$ _output/go/bin/kube-version-change -i myPod.v1beta1.yaml -o myPod.v1beta3.yaml
+$ _output/local/go/bin/kube-version-change -i myPod.v1beta1.yaml -o myPod.v1beta3.yaml
 ```
 
 ### Maintenance on a Node
@@ -37,7 +37,7 @@ $ _output/go/bin/kube-version-change -i myPod.v1beta1.yaml -o myPod.v1beta3.yaml
 If you need to reboot a node (such as for a kernel upgrade, libc upgrade, hardware repair, etc.), and the downtime is
 brief, then when the Kubelet restarts, it will attempt to restart the pods scheduled to it.  If the reboot takes longer,
 then the node controller will terminate the pods that are bound to the unavailable node.  If there is a corresponding
-replication controller, the a new copy of the pod will be started on a different node.  So, in the the case where all
+replication controller, then a new copy of the pod will be started on a different node.  So, in the case where all
 pods are replicated, upgrades can be done without special coordination.
 
 If you want more control over the upgrading process, you may use the following workflow:
@@ -46,11 +46,12 @@ If you want more control over the upgrading process, you may use the following w
     This keeps new pods from landing on the node while you are trying to get them off.
   1. Get the pods off the machine, via any of the following strategies:
     1. wait for finite-duration pods to complete
-    1. for pods with a replication controller, delete the pod with `kubectl delete pods $PODNAME`
-    1. for pods which are not replicated, bring up a new copy of the pod, and redirect clients to it.
+    1. delete pods with `kubectl delete pods $PODNAME`
+    1. for pods with a replication controller, the pod will eventually be replaced by a new pod which will be scheduled to a new node. additionally, if the pod is part of a service, then clients will automatically be redirected to the new pod.
+    1. for pods with no replication controller, you need to bring up a new copy of the pod, and assuming it is not part of a service, redirect clients to it.
   1. Work on the node
   1. Make the node schedulable again:
     `kubectl update nodes $NODENAME --patch='{"apiVersion": "v1beta1", "unschedulable": false}'`.
-     Or, if you deleted the VM instance and created a new one, and are using `--sync_nodes=true` on the apiserver
-     (the default), then a new schedulable node resource will be created automatically when you create a new
-     VM instance.  See [Node](node.md).
+    If you deleted the node's VM instance and created a new one, then a new schedulable node resource will
+    be created automatically when you create a new VM instance (if you're using a cloud provider that supports
+    node discovery; currently this is only GCE, not including CoreOS on GCE using kube-register). See [Node](node.md).

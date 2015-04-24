@@ -14,6 +14,29 @@ func (y YesNo) MarshalJSON() ([]byte, error) {
 	return []byte("no"), nil
 }
 
+// clear && go test -v -test.run TestRef_Issue190 ...swagger
+func TestRef_Issue190(t *testing.T) {
+	type User struct {
+		items []string
+	}
+	testJsonFromStruct(t, User{}, `{
+  "swagger.User": {
+   "id": "swagger.User",
+   "required": [
+    "items"
+   ],
+   "properties": {
+    "items": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ }`)
+}
+
 // clear && go test -v -test.run TestCustomMarshaller_Issue96 ...swagger
 func TestCustomMarshaller_Issue96(t *testing.T) {
 	type Vote struct {
@@ -96,7 +119,7 @@ func TestS2(t *testing.T) {
     "Ids": {
      "type": "array",
      "items": {
-      "$ref": "string"
+      "type": "string"
      }
     }
    }
@@ -131,7 +154,7 @@ func TestS3(t *testing.T) {
    ],
    "properties": {
     "Nested": {
-     "type": "swagger.NestedS3"
+     "$ref": "swagger.NestedS3"
     }
    }
   }
@@ -180,7 +203,7 @@ func TestSampleToModelAsJson(t *testing.T) {
      }
     },
     "root": {
-     "type": "swagger.item",
+     "$ref": "swagger.item",
      "description": "root desc"
     }
    }
@@ -284,7 +307,7 @@ func TestAnonymousStruct(t *testing.T) {
    ],
    "properties": {
     "A": {
-     "type": "swagger.X.A"
+     "$ref": "swagger.X.A"
     }
    }
   },
@@ -320,7 +343,7 @@ func TestAnonymousPtrStruct(t *testing.T) {
    ],
    "properties": {
     "A": {
-     "type": "swagger.X.A"
+     "$ref": "swagger.X.A"
     }
    }
   },
@@ -474,7 +497,7 @@ func TestIssue85(t *testing.T) {
     "Names": {
      "type": "array",
      "items": {
-      "$ref": "string"
+      "type": "string"
      }
     }
    }
@@ -531,7 +554,7 @@ func TestEmbeddedStructA1(t *testing.T) {
    ],
    "properties": {
     "B": {
-     "type": "swagger.A1.B"
+     "$ref": "swagger.A1.B"
     }
    }
   },
@@ -605,7 +628,62 @@ func TestStructA3(t *testing.T) {
    ],
    "properties": {
     "B": {
-     "type": "swagger.D"
+     "$ref": "swagger.D"
+    }
+   }
+  },
+  "swagger.D": {
+   "id": "swagger.D",
+   "required": [
+    "Id"
+   ],
+   "properties": {
+    "Id": {
+     "type": "integer",
+     "format": "int32"
+    }
+   }
+  }
+ }`)
+}
+
+type A4 struct {
+	D "json:,inline"
+}
+
+// clear && go test -v -test.run TestStructA4 ...swagger
+func TestEmbeddedStructA4(t *testing.T) {
+	testJsonFromStruct(t, A4{}, `{
+  "swagger.A4": {
+   "id": "swagger.A4",
+   "required": [
+    "Id"
+   ],
+   "properties": {
+    "Id": {
+     "type": "integer",
+     "format": "int32"
+    }
+   }
+  }
+ }`)
+}
+
+type A5 struct {
+	D `json:"d"`
+}
+
+// clear && go test -v -test.run TestStructA5 ...swagger
+func TestEmbeddedStructA5(t *testing.T) {
+	testJsonFromStruct(t, A5{}, `{
+  "swagger.A5": {
+   "id": "swagger.A5",
+   "required": [
+    "d"
+   ],
+   "properties": {
+    "d": {
+     "$ref": "swagger.D"
     }
    }
   },
@@ -695,7 +773,7 @@ func TestIssue158(t *testing.T) {
    ],
    "properties": {
     "address": {
-     "type": "swagger.Address"
+     "$ref": "swagger.Address"
     },
     "name": {
      "type": "string"

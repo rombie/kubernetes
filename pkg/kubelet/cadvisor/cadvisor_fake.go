@@ -17,6 +17,7 @@ limitations under the License.
 package cadvisor
 
 import (
+	"github.com/google/cadvisor/events"
 	cadvisorApi "github.com/google/cadvisor/info/v1"
 	cadvisorApiV2 "github.com/google/cadvisor/info/v2"
 )
@@ -31,6 +32,10 @@ func (c *Fake) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest)
 	return new(cadvisorApi.ContainerInfo), nil
 }
 
+func (c *Fake) SubcontainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (map[string]*cadvisorApi.ContainerInfo, error) {
+	return map[string]*cadvisorApi.ContainerInfo{}, nil
+}
+
 func (c *Fake) DockerContainer(name string, req *cadvisorApi.ContainerInfoRequest) (cadvisorApi.ContainerInfo, error) {
 	return cadvisorApi.ContainerInfo{}, nil
 }
@@ -39,6 +44,14 @@ func (c *Fake) MachineInfo() (*cadvisorApi.MachineInfo, error) {
 	return new(cadvisorApi.MachineInfo), nil
 }
 
+func (c *Fake) VersionInfo() (*cadvisorApi.VersionInfo, error) {
+	return new(cadvisorApi.VersionInfo), nil
+}
+
 func (c *Fake) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
 	return cadvisorApiV2.FsInfo{}, nil
+}
+
+func (c *Fake) GetPastEvents(request *events.Request) ([]*cadvisorApi.Event, error) {
+	return []*cadvisorApi.Event{}, nil
 }

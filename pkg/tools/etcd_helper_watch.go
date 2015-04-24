@@ -32,6 +32,15 @@ import (
 	"github.com/golang/glog"
 )
 
+// Etcd watch event actions
+const (
+	EtcdCreate = "create"
+	EtcdGet    = "get"
+	EtcdSet    = "set"
+	EtcdCAS    = "compareAndSwap"
+	EtcdDelete = "delete"
+)
+
 // FilterFunc is a predicate which takes an API object and returns true
 // iff the object should remain in the set.
 type FilterFunc func(obj runtime.Object) bool
@@ -70,8 +79,10 @@ func (h *EtcdHelper) WatchList(key string, resourceVersion uint64, filter Filter
 // Watch begins watching the specified key. Events are decoded into
 // API objects and sent down the returned watch.Interface.
 // Errors will be sent down the channel.
-func (h *EtcdHelper) Watch(key string, resourceVersion uint64) watch.Interface {
-	return h.WatchAndTransform(key, resourceVersion, nil)
+func (h *EtcdHelper) Watch(key string, resourceVersion uint64, filter FilterFunc) (watch.Interface, error) {
+	w := newEtcdWatcher(false, nil, filter, h.Codec, h.Versioner, nil)
+	go w.etcdWatch(h.Client, key, resourceVersion)
+	return w, nil
 }
 
 // WatchAndTransform begins watching the specified key. Events are decoded into
@@ -377,11 +388,11 @@ func (w *etcdWatcher) sendDelete(res *etcd.Response) {
 
 func (w *etcdWatcher) sendResult(res *etcd.Response) {
 	switch res.Action {
-	case "create", "get":
+	case EtcdCreate, EtcdGet:
 		w.sendAdd(res)
-	case "set", "compareAndSwap":
+	case EtcdSet, EtcdCAS:
 		w.sendModify(res)
-	case "delete":
+	case EtcdDelete:
 		w.sendDelete(res)
 	default:
 		glog.Errorf("unknown action: %v", res.Action)

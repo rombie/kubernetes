@@ -19,6 +19,8 @@
 # Use the config file specified in $KUBE_CONFIG_FILE, or default to
 # config-default.sh.
 
+KUBE_PROMPT_FOR_UPDATE=y
+KUBE_SKIP_UPDATE=${KUBE_SKIP_UPDATE-"n"}
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/../..
 source "${KUBE_ROOT}/cluster/gke/${KUBE_CONFIG_FILE:-config-default.sh}"
 
@@ -68,12 +70,37 @@ function test-build-release() {
 
 # Verify needed binaries exist.
 function verify-prereqs() {
-  echo "... in verify-prereqs()" >&2
-
-  ${GCLOUD} preview --help >/dev/null || {
-    echo "Either the GCLOUD environment variable is wrong, or the 'preview' component"
-    echo "is not installed. (Fix with 'gcloud components update preview')"
-  }
+  if ! which gcloud >/dev/null; then
+    local resp
+    if [[ "${KUBE_PROMPT_FOR_UPDATE}" == "y" ]]; then
+      echo "Can't find gcloud in PATH.  Do you wish to install the Google Cloud SDK? [Y/n]"
+      read resp
+    else
+      resp="y"
+    fi
+    if [[ "${resp}" != "n" && "${resp}" != "N" ]]; then
+      curl https://sdk.cloud.google.com | bash
+    fi
+    if ! which gcloud >/dev/null; then
+      echo "Can't find gcloud in PATH, please fix and retry. The Google Cloud "
+      echo "SDK can be downloaded from https://cloud.google.com/sdk/."
+      exit 1
+    fi
+  fi
+  if [[ "${KUBE_SKIP_UPDATE}" == "y" ]]; then
+    return
+  fi
+  # update and install components as needed
+  if [[ "${KUBE_PROMPT_FOR_UPDATE}" != "y" ]]; then
+    gcloud_prompt="-q"
+  fi
+  local sudo_prefix=""
+  if [ ! -w $(dirname `which gcloud`) ]; then
+    sudo_prefix="sudo"
+  fi
+  ${sudo_prefix} gcloud ${gcloud_prompt:-} components update preview || true
+  ${sudo_prefix} gcloud ${gcloud_prompt:-} components update alpha|| true
+  ${sudo_prefix} gcloud ${gcloud_prompt:-} components update || true
 }
 
 # Instantiate a kubernetes cluster
@@ -110,7 +137,7 @@ function kube-up() {
   fi
 
   # Bring up the cluster.
-  "${GCLOUD}" preview container clusters create "${CLUSTER_NAME}" \
+  "${GCLOUD}" alpha container clusters create "${CLUSTER_NAME}" \
     --zone="${ZONE}" \
     --project="${PROJECT}" \
     --cluster-api-version="${CLUSTER_API_VERSION:-}" \
@@ -157,10 +184,10 @@ function test-setup() {
 function get-password() {
   echo "... in get-password()" >&2
   detect-project >&2
-  KUBE_USER=$("${GCLOUD}" preview container clusters describe \
+  KUBE_USER=$("${GCLOUD}" alpha container clusters describe \
     --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" \
     | grep user | cut -f 4 -d ' ')
-  KUBE_PASSWORD=$("${GCLOUD}" preview container clusters describe \
+  KUBE_PASSWORD=$("${GCLOUD}" alpha container clusters describe \
     --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" \
     | grep password | cut -f 4 -d ' ')
 }
@@ -177,7 +204,7 @@ function detect-master() {
   echo "... in detect-master()" >&2
   detect-project >&2
   KUBE_MASTER="k8s-${CLUSTER_NAME}-master"
-  KUBE_MASTER_IP=$("${GCLOUD}" preview container clusters describe \
+  KUBE_MASTER_IP=$("${GCLOUD}" alpha container clusters describe \
     --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" \
     | grep endpoint | cut -f 2 -d ' ')
 }
@@ -200,7 +227,7 @@ function detect-minions() {
 function detect-minion-names {
   detect-project
   export MINION_NAMES=""
-  count=$("${GCLOUD}" preview container clusters describe --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" | grep numNodes | cut -f 2 -d ' ')
+  count=$("${GCLOUD}" alpha container clusters describe --project="${PROJECT}" --zone="${ZONE}" "${CLUSTER_NAME}" | grep numNodes | cut -f 2 -d ' ')
   for x in $(seq 1 $count); do
     export MINION_NAMES="${MINION_NAMES} k8s-${CLUSTER_NAME}-node-${x} ";
   done
@@ -219,8 +246,15 @@ function ssh-to-node() {
 
   local node="$1"
   local cmd="$2"
-  "${GCLOUD}" compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" \
-    --zone="${ZONE}" "${node}" --command "${cmd}"
+  # Loop until we can successfully ssh into the box
+  for try in $(seq 1 5); do
+    if gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" --zone="${ZONE}" "${node}" --command "echo test > /dev/null"; then
+      break
+    fi
+    sleep 5
+  done
+  # Then actually try the command.
+  gcloud compute ssh --ssh-flag="-o LogLevel=quiet" --project "${PROJECT}" --zone="${ZONE}" "${node}" --command "${cmd}"
 }
 
 # Restart the kube-proxy on a node ($1)
@@ -232,7 +266,7 @@ function restart-kube-proxy() {
 # Restart the kube-proxy on master ($1)
 function restart-apiserver() {
   echo "... in restart-kube-apiserver()"  >&2
-  ssh-to-node "$1" "sudo /etc/init.d/kube-apiserver restart"
+  ssh-to-node "$1" "sudo docker ps | grep /kube-apiserver | cut -d ' ' -f 1 | xargs sudo docker kill"
 }
 
 # Execute after running tests to perform any required clean-up.  This is called
@@ -268,6 +302,6 @@ function test-teardown() {
 function kube-down() {
   echo "... in kube-down()" >&2
   detect-project >&2
-  "${GCLOUD}" preview container clusters delete --project="${PROJECT}" \
+  "${GCLOUD}" alpha container clusters delete --project="${PROJECT}" \
     --zone="${ZONE}" "${CLUSTER_NAME}"
 }

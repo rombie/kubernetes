@@ -18,7 +18,7 @@ func testJsonFromStruct(t *testing.T, sample interface{}, expectedJson string) b
 func modelsFromStruct(sample interface{}) map[string]Model {
 	models := map[string]Model{}
 	builder := modelBuilder{models}
-	builder.addModel(reflect.TypeOf(sample), "")
+	builder.addModelFrom(sample)
 	return models
 }
 
@@ -32,6 +32,8 @@ func compareJson(t *testing.T, actualJsonAsString string, expectedJsonAsString s
 		fmt.Println(withLineNumbers(expectedJsonAsString))
 		fmt.Println("---- actual -----")
 		fmt.Println(withLineNumbers(actualJsonAsString))
+		fmt.Println("---- raw -----")
+		fmt.Println(actualJsonAsString)
 		t.Error("there are differences")
 		return false
 	}

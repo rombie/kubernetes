@@ -40,18 +40,25 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/authorizer"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/auth/handlers"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/master/ports"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/componentstatus"
 	controlleretcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/controller/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/endpoint"
+	endpointsetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/endpoint/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/event"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/limitrange"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/minion"
+	nodeetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/minion/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/namespace"
 	namespaceetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/namespace/etcd"
+	pvetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/persistentvolume/etcd"
+	pvcetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/persistentvolumeclaim/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/pod"
 	podetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/pod/etcd"
+	podtemplateetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/podtemplate/etcd"
 	resourcequotaetcd "github.com/GoogleCloudPlatform/kubernetes/pkg/registry/resourcequota/etcd"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/secret"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/registry/service"
@@ -66,7 +73,6 @@ import (
 
 // Config is a structure used to configure a Master.
 type Config struct {
-	Cloud             cloudprovider.Interface
 	EtcdHelper        tools.EtcdHelper
 	EventTTL          time.Duration
 	MinionRegexp      string
@@ -76,8 +82,8 @@ type Config struct {
 	EnableUISupport   bool
 	// allow downstream consumers to disable swagger
 	EnableSwaggerSupport bool
-	// allow v1beta3 to be conditionally enabled
-	EnableV1Beta3 bool
+	// allow v1beta3 to be conditionally disabled
+	DisableV1Beta3 bool
 	// allow downstream consumers to disable the index route
 	EnableIndex            bool
 	EnableProfiling        bool
@@ -105,6 +111,9 @@ type Config struct {
 	// Defaults to 6443 if not set.
 	ReadWritePort int
 
+	// ExternalHost is the host name to use for external (public internet) facing URLs (e.g. Swagger)
+	ExternalHost string
+
 	// If nil, the first result from net.InterfaceAddrs will be used.
 	PublicAddress net.IP
 
@@ -114,9 +123,6 @@ type Config struct {
 
 	// The name of the cluster.
 	ClusterName string
-
-	// If true we will periodically probe pods statuses.
-	SyncPodStatus bool
 }
 
 // Master contains state for a Kubernetes cluster master/api server.
@@ -142,7 +148,10 @@ type Master struct {
 	v1beta3               bool
 	requestContextMapper  api.RequestContextMapper
 
-	publicIP             net.IP
+	// External host is the name that should be used in external (public internet) URLs for this master
+	externalHost string
+	// clusterIP is the IP address of the master within the cluster.
+	clusterIP            net.IP
 	publicReadOnlyPort   int
 	publicReadWritePort  int
 	serviceReadOnlyIP    net.IP
@@ -204,7 +213,9 @@ func setDefaults(c *Config) {
 	if c.CacheTimeout == 0 {
 		c.CacheTimeout = 5 * time.Second
 	}
-	for c.PublicAddress == nil {
+	for c.PublicAddress == nil || c.PublicAddress.IsUnspecified() {
+		// TODO: This should be done in the caller and just require a
+		// valid value to be passed in.
 		hostIP, err := util.ChooseHostInterface()
 		if err != nil {
 			glog.Fatalf("Unable to find suitable network address.error='%v' . "+
@@ -272,13 +283,14 @@ func New(c *Config) *Master {
 		authenticator:         c.Authenticator,
 		authorizer:            c.Authorizer,
 		admissionControl:      c.AdmissionControl,
-		v1beta3:               c.EnableV1Beta3,
+		v1beta3:               !c.DisableV1Beta3,
 		requestContextMapper:  c.RequestContextMapper,
 
 		cacheTimeout: c.CacheTimeout,
 
 		masterCount:         c.MasterCount,
-		publicIP:            c.PublicAddress,
+		externalHost:        c.ExternalHost,
+		clusterIP:           c.PublicAddress,
 		publicReadOnlyPort:  c.ReadOnlyPort,
 		publicReadWritePort: c.ReadWritePort,
 		serviceReadOnlyIP:   serviceReadOnlyIP,
@@ -349,64 +361,76 @@ func logStackOnRecover(panicReason interface{}, httpWriter http.ResponseWriter) 
 
 // init initializes master.
 func (m *Master) init(c *Config) {
-	podStorage, bindingStorage, podStatusStorage := podetcd.NewStorage(c.EtcdHelper)
-	podRegistry := pod.NewRegistry(podStorage)
+	// TODO: make initialization of the helper part of the Master, and allow some storage
+	// objects to have a newer storage version than the user's default.
+	newerHelper, err := NewEtcdHelper(c.EtcdHelper.Client, "v1beta3")
+	if err != nil {
+		glog.Fatalf("Unable to setup storage for v1beta3: %v", err)
+	}
+
+	podStorage := podetcd.NewStorage(c.EtcdHelper, c.KubeletClient)
+	podRegistry := pod.NewRegistry(podStorage.Pod)
+
+	podTemplateStorage := podtemplateetcd.NewREST(newerHelper)
 
 	eventRegistry := event.NewEtcdRegistry(c.EtcdHelper, uint64(c.EventTTL.Seconds()))
 	limitRangeRegistry := limitrange.NewEtcdRegistry(c.EtcdHelper)
 
 	resourceQuotaStorage, resourceQuotaStatusStorage := resourcequotaetcd.NewStorage(c.EtcdHelper)
 	secretRegistry := secret.NewEtcdRegistry(c.EtcdHelper)
+	persistentVolumeStorage, persistentVolumeStatusStorage := pvetcd.NewStorage(c.EtcdHelper)
+	persistentVolumeClaimStorage, persistentVolumeClaimStatusStorage := pvcetcd.NewStorage(c.EtcdHelper)
 
 	namespaceStorage, namespaceStatusStorage, namespaceFinalizeStorage := namespaceetcd.NewStorage(c.EtcdHelper)
 	m.namespaceRegistry = namespace.NewRegistry(namespaceStorage)
 
+	endpointsStorage := endpointsetcd.NewStorage(c.EtcdHelper)
+	m.endpointRegistry = endpoint.NewRegistry(endpointsStorage)
+
+	nodeStorage, nodeStatusStorage := nodeetcd.NewStorage(c.EtcdHelper, c.KubeletClient)
+	m.nodeRegistry = minion.NewRegistry(nodeStorage)
+
 	// TODO: split me up into distinct storage registries
-	registry := etcd.NewRegistry(c.EtcdHelper, podRegistry)
-
+	registry := etcd.NewRegistry(c.EtcdHelper, podRegistry, m.endpointRegistry)
 	m.serviceRegistry = registry
-	m.endpointRegistry = registry
-	m.nodeRegistry = registry
-
-	nodeStorage := minion.NewStorage(m.nodeRegistry, c.KubeletClient)
-	// TODO: unify the storage -> registry and storage -> client patterns
-	nodeStorageClient := RESTStorageToNodes(nodeStorage)
-	podCache := NewPodCache(
-		c.KubeletClient,
-		nodeStorageClient.Nodes(),
-		podRegistry,
-	)
-
-	if c.SyncPodStatus {
-		go util.Forever(podCache.UpdateAllContainers, m.cacheTimeout)
-		go util.Forever(podCache.GarbageCollectPodStatus, time.Minute*30)
-		// Note the pod cache needs access to an un-decorated RESTStorage
-		podStorage = podStorage.WithPodStatus(podCache)
-	}
 
 	controllerStorage := controlleretcd.NewREST(c.EtcdHelper)
 
 	// TODO: Factor out the core API registration
 	m.storage = map[string]rest.Storage{
-		"pods":         podStorage,
-		"pods/status":  podStatusStorage,
-		"pods/binding": bindingStorage,
-		"bindings":     bindingStorage,
+		"pods":             podStorage.Pod,
+		"pods/status":      podStorage.Status,
+		"pods/log":         podStorage.Log,
+		"pods/exec":        podStorage.Exec,
+		"pods/portforward": podStorage.PortForward,
+		"pods/proxy":       podStorage.Proxy,
+		"pods/binding":     podStorage.Binding,
+		"bindings":         podStorage.Binding,
+
+		"podTemplates": podTemplateStorage,
 
 		"replicationControllers": controllerStorage,
-		"services":               service.NewStorage(m.serviceRegistry, c.Cloud, m.nodeRegistry, m.portalNet, c.ClusterName),
-		"endpoints":              endpoint.NewStorage(m.endpointRegistry),
+		"services":               service.NewStorage(m.serviceRegistry, m.nodeRegistry, m.endpointRegistry, m.portalNet, c.ClusterName),
+		"endpoints":              endpointsStorage,
 		"minions":                nodeStorage,
+		"minions/status":         nodeStatusStorage,
 		"nodes":                  nodeStorage,
+		"nodes/status":           nodeStatusStorage,
 		"events":                 event.NewStorage(eventRegistry),
 
-		"limitRanges":           limitrange.NewStorage(limitRangeRegistry),
-		"resourceQuotas":        resourceQuotaStorage,
-		"resourceQuotas/status": resourceQuotaStatusStorage,
-		"namespaces":            namespaceStorage,
-		"namespaces/status":     namespaceStatusStorage,
-		"namespaces/finalize":   namespaceFinalizeStorage,
-		"secrets":               secret.NewStorage(secretRegistry),
+		"limitRanges":                   limitrange.NewStorage(limitRangeRegistry),
+		"resourceQuotas":                resourceQuotaStorage,
+		"resourceQuotas/status":         resourceQuotaStatusStorage,
+		"namespaces":                    namespaceStorage,
+		"namespaces/status":             namespaceStatusStorage,
+		"namespaces/finalize":           namespaceFinalizeStorage,
+		"secrets":                       secret.NewStorage(secretRegistry),
+		"persistentVolumes":             persistentVolumeStorage,
+		"persistentVolumes/status":      persistentVolumeStatusStorage,
+		"persistentVolumeClaims":        persistentVolumeClaimStorage,
+		"persistentVolumeClaims/status": persistentVolumeClaimStatusStorage,
+
+		"componentStatuses": componentstatus.NewStorage(func() map[string]apiserver.Server { return m.getServersToValidate(c) }),
 	}
 
 	apiVersions := []string{"v1beta1", "v1beta2"}
@@ -416,7 +440,7 @@ func (m *Master) init(c *Config) {
 	if err := m.api_v1beta2().InstallREST(m.handlerContainer); err != nil {
 		glog.Fatalf("Unable to setup API v1beta2: %v", err)
 	}
-	if c.EnableV1Beta3 {
+	if m.v1beta3 {
 		if err := m.api_v1beta3().InstallREST(m.handlerContainer); err != nil {
 			glog.Fatalf("Unable to setup API v1beta3: %v", err)
 		}
@@ -425,6 +449,9 @@ func (m *Master) init(c *Config) {
 
 	apiserver.InstallSupport(m.muxHelper, m.rootWebService)
 	apiserver.AddApiWebService(m.handlerContainer, c.APIPrefix, apiVersions)
+	defaultVersion := m.defaultAPIGroupVersion()
+	requestInfoResolver := &apiserver.APIRequestInfoResolver{util.NewStringSet(strings.TrimPrefix(defaultVersion.Root, "/")), defaultVersion.Mapper}
+	apiserver.InstallServiceErrorHandler(m.handlerContainer, requestInfoResolver, apiVersions)
 
 	// Register root handler.
 	// We do not register this using restful Webservice since we do not want to surface this in api docs.
@@ -508,14 +535,23 @@ func (m *Master) init(c *Config) {
 // register their own web services into the Kubernetes mux prior to initialization
 // of swagger, so that other resource types show up in the documentation.
 func (m *Master) InstallSwaggerAPI() {
-	webServicesUrl := ""
-	// Use the secure read write port, if available.
-	if m.publicReadWritePort != 0 {
-		webServicesUrl = "https://" + net.JoinHostPort(m.publicIP.String(), strconv.Itoa(m.publicReadWritePort))
-	} else {
-		// Use the read only port.
-		webServicesUrl = "http://" + net.JoinHostPort(m.publicIP.String(), strconv.Itoa(m.publicReadOnlyPort))
+	hostAndPort := m.externalHost
+	protocol := "https://"
+
+	// TODO: this is kind of messed up, we should just pipe in the full URL from the outside, rather
+	// than guessing at it.
+	if len(m.externalHost) == 0 && m.clusterIP != nil {
+		host := m.clusterIP.String()
+		if m.publicReadWritePort != 0 {
+			hostAndPort = net.JoinHostPort(host, strconv.Itoa(m.publicReadWritePort))
+		} else {
+			// Use the read only port.
+			hostAndPort = net.JoinHostPort(host, strconv.Itoa(m.publicReadOnlyPort))
+			protocol = "http://"
+		}
 	}
+	webServicesUrl := protocol + hostAndPort
+
 	// Enable swagger UI and discovery API
 	swaggerConfig := swagger.Config{
 		WebServicesUrl:  webServicesUrl,
@@ -554,12 +590,12 @@ func (m *Master) getServersToValidate(c *Config) map[string]apiserver.Server {
 		}
 		serversToValidate[fmt.Sprintf("etcd-%d", ix)] = apiserver.Server{Addr: addr, Port: port, Path: "/v2/keys/"}
 	}
-	nodes, err := m.nodeRegistry.ListMinions(api.NewDefaultContext())
+	nodes, err := m.nodeRegistry.ListMinions(api.NewDefaultContext(), labels.Everything(), fields.Everything())
 	if err != nil {
 		glog.Errorf("Failed to list minions: %v", err)
 	}
 	for ix, node := range nodes.Items {
-		serversToValidate[fmt.Sprintf("node-%d", ix)] = apiserver.Server{Addr: node.Name, Port: ports.KubeletPort, Path: "/healthz"}
+		serversToValidate[fmt.Sprintf("node-%d", ix)] = apiserver.Server{Addr: node.Name, Port: ports.KubeletPort, Path: "/healthz", EnableHTTPS: true}
 	}
 	return serversToValidate
 }
@@ -570,9 +606,10 @@ func (m *Master) defaultAPIGroupVersion() *apiserver.APIGroupVersion {
 
 		Mapper: latest.RESTMapper,
 
-		Creater: api.Scheme,
-		Typer:   api.Scheme,
-		Linker:  latest.SelfLinker,
+		Creater:   api.Scheme,
+		Convertor: api.Scheme,
+		Typer:     api.Scheme,
+		Linker:    latest.SelfLinker,
 
 		Admit:   m.admissionControl,
 		Context: m.requestContextMapper,
@@ -583,6 +620,9 @@ func (m *Master) defaultAPIGroupVersion() *apiserver.APIGroupVersion {
 func (m *Master) api_v1beta1() *apiserver.APIGroupVersion {
 	storage := make(map[string]rest.Storage)
 	for k, v := range m.storage {
+		if k == "podTemplates" {
+			continue
+		}
 		storage[k] = v
 	}
 	version := m.defaultAPIGroupVersion()
@@ -596,6 +636,9 @@ func (m *Master) api_v1beta1() *apiserver.APIGroupVersion {
 func (m *Master) api_v1beta2() *apiserver.APIGroupVersion {
 	storage := make(map[string]rest.Storage)
 	for k, v := range m.storage {
+		if k == "podTemplates" {
+			continue
+		}
 		storage[k] = v
 	}
 	version := m.defaultAPIGroupVersion()

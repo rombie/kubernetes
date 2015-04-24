@@ -23,7 +23,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
+	volumeutil "github.com/GoogleCloudPlatform/kubernetes/pkg/volume/util"
 	"github.com/golang/glog"
 )
 
@@ -49,20 +51,16 @@ func (plugin *secretPlugin) Name() string {
 	return secretPluginName
 }
 
-func (plugin *secretPlugin) CanSupport(spec *api.Volume) bool {
-	if spec.Secret != nil {
-		return true
-	}
-
-	return false
+func (plugin *secretPlugin) CanSupport(spec *volume.Spec) bool {
+	return spec.VolumeSource.Secret != nil
 }
 
-func (plugin *secretPlugin) NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
-	return plugin.newBuilderInternal(spec, podRef)
+func (plugin *secretPlugin) NewBuilder(spec *volume.Spec, podRef *api.ObjectReference, opts volume.VolumeOptions) (volume.Builder, error) {
+	return plugin.newBuilderInternal(spec, podRef, opts)
 }
 
-func (plugin *secretPlugin) newBuilderInternal(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
-	return &secretVolume{spec.Name, *podRef, plugin, spec.Secret.Target}, nil
+func (plugin *secretPlugin) newBuilderInternal(spec *volume.Spec, podRef *api.ObjectReference, opts volume.VolumeOptions) (volume.Builder, error) {
+	return &secretVolume{spec.Name, *podRef, plugin, spec.VolumeSource.Secret.SecretName, &opts}, nil
 }
 
 func (plugin *secretPlugin) NewCleaner(volName string, podUID types.UID) (volume.Cleaner, error) {
@@ -70,16 +68,17 @@ func (plugin *secretPlugin) NewCleaner(volName string, podUID types.UID) (volume
 }
 
 func (plugin *secretPlugin) newCleanerInternal(volName string, podUID types.UID) (volume.Cleaner, error) {
-	return &secretVolume{volName, api.ObjectReference{UID: podUID}, plugin, api.ObjectReference{}}, nil
+	return &secretVolume{volName, api.ObjectReference{UID: podUID}, plugin, "", nil}, nil
 }
 
 // secretVolume handles retrieving secrets from the API server
 // and placing them into the volume on the host.
 type secretVolume struct {
-	volName   string
-	podRef    api.ObjectReference
-	plugin    *secretPlugin
-	secretRef api.ObjectReference
+	volName    string
+	podRef     api.ObjectReference
+	plugin     *secretPlugin
+	secretName string
+	opts       *volume.VolumeOptions
 }
 
 func (sv *secretVolume) SetUp() error {
@@ -87,16 +86,20 @@ func (sv *secretVolume) SetUp() error {
 }
 
 // This is the spec for the volume that this plugin wraps.
-var wrappedVolumeSpec = &api.Volume{
+var wrappedVolumeSpec = &volume.Spec{
 	Name:         "not-used",
 	VolumeSource: api.VolumeSource{EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageTypeMemory}},
 }
 
 func (sv *secretVolume) SetUpAt(dir string) error {
+	if volumeutil.IsReady(sv.getMetaDir()) {
+		return nil
+	}
+
 	glog.V(3).Infof("Setting up volume %v for pod %v at %v", sv.volName, sv.podRef.UID, dir)
 
 	// Wrap EmptyDir, let it do the setup.
-	wrapped, err := sv.plugin.host.NewWrapperBuilder(wrappedVolumeSpec, &sv.podRef)
+	wrapped, err := sv.plugin.host.NewWrapperBuilder(wrappedVolumeSpec, &sv.podRef, *sv.opts)
 	if err != nil {
 		return err
 	}
@@ -109,26 +112,45 @@ func (sv *secretVolume) SetUpAt(dir string) error {
 		return fmt.Errorf("Cannot setup secret volume %v because kube client is not configured", sv)
 	}
 
-	secret, err := kubeClient.Secrets(sv.podRef.Namespace).Get(sv.secretRef.Name)
+	secret, err := kubeClient.Secrets(sv.podRef.Namespace).Get(sv.secretName)
 	if err != nil {
-		glog.Errorf("Couldn't get secret %v/%v", sv.secretRef.Namespace, sv.secretRef.Name)
+		glog.Errorf("Couldn't get secret %v/%v", sv.podRef.Namespace, sv.secretName)
 		return err
+	} else {
+		totalBytes := totalSecretBytes(secret)
+		glog.V(3).Infof("Received secret %v/%v containing (%v) pieces of data, %v total bytes",
+			sv.podRef.Namespace,
+			sv.secretName,
+			len(secret.Data),
+			totalBytes)
 	}
 
 	for name, data := range secret.Data {
 		hostFilePath := path.Join(dir, name)
-		err := ioutil.WriteFile(hostFilePath, data, 0777)
+		glog.V(3).Infof("Writing secret data %v/%v/%v (%v bytes) to host file %v", sv.podRef.Namespace, sv.secretName, name, len(data), hostFilePath)
+		err := ioutil.WriteFile(hostFilePath, data, 0444)
 		if err != nil {
 			glog.Errorf("Error writing secret data to host path: %v, %v", hostFilePath, err)
 			return err
 		}
 	}
 
+	volumeutil.SetReady(sv.getMetaDir())
+
 	return nil
 }
 
+func totalSecretBytes(secret *api.Secret) int {
+	totalSize := 0
+	for _, bytes := range secret.Data {
+		totalSize += len(bytes)
+	}
+
+	return totalSize
+}
+
 func (sv *secretVolume) GetPath() string {
-	return sv.plugin.host.GetPodVolumeDir(sv.podRef.UID, volume.EscapePluginName(secretPluginName), sv.volName)
+	return sv.plugin.host.GetPodVolumeDir(sv.podRef.UID, util.EscapeQualifiedNameForDisk(secretPluginName), sv.volName)
 }
 
 func (sv *secretVolume) TearDown() error {
@@ -144,4 +166,8 @@ func (sv *secretVolume) TearDownAt(dir string) error {
 		return err
 	}
 	return wrapped.TearDownAt(dir)
+}
+
+func (sv *secretVolume) getMetaDir() string {
+	return path.Join(sv.plugin.host.GetPodPluginDir(sv.podRef.UID, util.EscapeQualifiedNameForDisk(secretPluginName)), sv.volName)
 }

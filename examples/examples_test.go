@@ -34,7 +34,6 @@ import (
 )
 
 func validateObject(obj runtime.Object) (errors []error) {
-	ctx := api.NewDefaultContext()
 	switch t := obj.(type) {
 	case *api.ReplicationController:
 		if t.Namespace == "" {
@@ -49,7 +48,6 @@ func validateObject(obj runtime.Object) (errors []error) {
 		if t.Namespace == "" {
 			t.Namespace = api.NamespaceDefault
 		}
-		api.ValidNamespace(ctx, &t.ObjectMeta)
 		errors = validation.ValidateService(t)
 	case *api.ServiceList:
 		for i := range t.Items {
@@ -59,12 +57,23 @@ func validateObject(obj runtime.Object) (errors []error) {
 		if t.Namespace == "" {
 			t.Namespace = api.NamespaceDefault
 		}
-		api.ValidNamespace(ctx, &t.ObjectMeta)
 		errors = validation.ValidatePod(t)
 	case *api.PodList:
 		for i := range t.Items {
 			errors = append(errors, validateObject(&t.Items[i])...)
 		}
+	case *api.PersistentVolume:
+		errors = validation.ValidatePersistentVolume(t)
+	case *api.PersistentVolumeClaim:
+		if t.Namespace == "" {
+			t.Namespace = api.NamespaceDefault
+		}
+		errors = validation.ValidatePersistentVolumeClaim(t)
+	case *api.PodTemplate:
+		if t.Namespace == "" {
+			t.Namespace = api.NamespaceDefault
+		}
+		errors = validation.ValidatePodTemplate(t)
 	default:
 		return []error{fmt.Errorf("no validation defined for %#v", obj)}
 	}
@@ -121,14 +130,6 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"redis-master-service":    &api.Service{},
 			"redis-slave-service":     &api.Service{},
 		},
-		"../examples/guestbook/v1beta3": {
-			"frontend-controller":    &api.ReplicationController{},
-			"redis-slave-controller": &api.ReplicationController{},
-			"redis-master":           &api.ReplicationController{},
-			"frontend-service":       &api.Service{},
-			"redis-master-service":   &api.Service{},
-			"redis-slave-service":    &api.Service{},
-		},
 		"../examples/guestbook-go": {
 			"guestbook-controller":    &api.ReplicationController{},
 			"redis-slave-controller":  &api.ReplicationController{},
@@ -151,14 +152,30 @@ func TestExampleObjectSchemas(t *testing.T) {
 			"pod-with-http-healthcheck": &api.Pod{},
 			"service":                   &api.Service{},
 			"replication-controller":    &api.ReplicationController{},
+			"podtemplate":               &api.PodTemplate{},
 		},
-		"../examples/update-demo/v1beta1": {
+		"../examples/update-demo": {
 			"kitten-rc":   &api.ReplicationController{},
 			"nautilus-rc": &api.ReplicationController{},
 		},
-		"../examples/update-demo/v1beta3": {
-			"kitten-rc":   &api.ReplicationController{},
-			"nautilus-rc": &api.ReplicationController{},
+		"../examples/persistent-volumes/volumes": {
+			"local-01": &api.PersistentVolume{},
+			"local-02": &api.PersistentVolume{},
+			"gce":      &api.PersistentVolume{},
+		},
+		"../examples/persistent-volumes/claims": {
+			"claim-01": &api.PersistentVolumeClaim{},
+			"claim-02": &api.PersistentVolumeClaim{},
+			"claim-03": &api.PersistentVolumeClaim{},
+		},
+		"../examples/iscsi/v1beta1": {
+			"iscsi": &api.Pod{},
+		},
+		"../examples/iscsi/v1beta3": {
+			"iscsi": &api.Pod{},
+		},
+		"../examples/glusterfs/v1beta3": {
+			"glusterfs": &api.Pod{},
 		},
 	}
 
@@ -167,7 +184,7 @@ func TestExampleObjectSchemas(t *testing.T) {
 		err := walkJSONFiles(path, func(name, path string, data []byte) {
 			expectedType, found := expected[name]
 			if !found {
-				t.Errorf("%s does not have a test case defined", path)
+				t.Errorf("%s: %s does not have a test case defined", path, name)
 				return
 			}
 			tested += 1
@@ -188,13 +205,30 @@ func TestExampleObjectSchemas(t *testing.T) {
 	}
 }
 
-var sampleRegexp = regexp.MustCompile("(?ms)^```(?:(?P<type>yaml)\\w*\\n(?P<content>.+?)|\\w*\\n(?P<content>\\{.+?\\}))\\w*\\n^```")
+// This regex is tricky, but it works.  For future me, here is the decode:
+//
+// Flags: (?ms) = multiline match, allow . to match \n
+// 1) Look for a line that starts with ``` (a markdown code block)
+// 2) (?: ... ) = non-capturing group
+// 3) (P<name>) = capture group as "name"
+// 4) Look for #1 followed by either:
+// 4a)    "yaml" followed by any word-characters followed by a newline (e.g. ```yamlfoo\n)
+// 4b)    "any word-characters followed by a newline (e.g. ```json\n)
+// 5) Look for either:
+// 5a)    #4a followed by one or more characters (non-greedy)
+// 5b)    #4b followed by { followed by one or more characters (non-greedy) followed by }
+// 6) Look for #5 followed by a newline followed by ``` (end of the code block)
+//
+// This could probably be simplified, but is already too delicate.  Before any
+// real changes, we should have a testscase that just tests this regex.
+var sampleRegexp = regexp.MustCompile("(?ms)^```(?:(?P<type>yaml)\\w*\\n(?P<content>.+?)|\\w*\\n(?P<content>\\{.+?\\}))\\n^```")
 var subsetRegexp = regexp.MustCompile("(?ms)\\.{3}")
 
 func TestReadme(t *testing.T) {
 	paths := []string{
 		"../README.md",
 		"../examples/walkthrough/README.md",
+		"../examples/iscsi/README.md",
 	}
 
 	for _, path := range paths {

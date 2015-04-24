@@ -55,9 +55,9 @@ for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
     echo "Adding $minion to hosts file"
     echo "$ip $minion" >> /etc/hosts
   fi
-  echo "127.0.0.1 localhost" >> /etc/hosts # enables cmds like 'kubectl get pods' on master.
 done
 echo "$MASTER_IP $MASTER_NAME" >> /etc/hosts
+echo "127.0.0.1 localhost" >> /etc/hosts # enables cmds like 'kubectl get pods' on master.
 
 # Update salt configuration
 mkdir -p /etc/salt/minion.d
@@ -76,14 +76,11 @@ EOF
 cat <<EOF >/etc/salt/minion.d/grains.conf
 grains:
   node_ip: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
-  master_ip: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   publicAddressOverride: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   network_mode: openvswitch
   networkInterfaceName: eth1
-  etcd_servers: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   api_servers: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   cloud: vagrant
-  cloud_provider: vagrant
   roles:
     - kubernetes-master
   runtime_config: '$(echo "$RUNTIME_CONFIG" | sed -e "s/'/''/g")'
@@ -150,6 +147,17 @@ if [[ ! -f "${known_tokens_file}" ]]; then
   mkdir -p /srv/salt-overlay/salt/kubelet
   kubelet_auth_file="/srv/salt-overlay/salt/kubelet/kubernetes_auth"
   (umask u=rw,go= ; echo "{\"BearerToken\": \"$kubelet_token\", \"Insecure\": true }" > $kubelet_auth_file)
+
+  # Generate tokens for other "service accounts".  Append to known_tokens.
+  #
+  # NB: If this list ever changes, this script actually has to
+  # change to detect the existence of this file, kill any deleted
+  # old tokens and add any new tokens (to handle the upgrade case).
+  service_accounts=("system:scheduler" "system:controller_manager" "system:logging" "system:monitoring" "system:dns")
+  for account in "${service_accounts[@]}"; do
+    token=$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64 | tr -d "=+/" | dd bs=32 count=1 2>/dev/null)
+    echo "${token},${account},${account}" >> "${known_tokens_file}"
+  done
 fi
 
 # Configure nginx authorization

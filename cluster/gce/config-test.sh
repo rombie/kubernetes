@@ -18,11 +18,11 @@
 # gcloud multiplexing for shared GCE/GKE tests.
 GCLOUD=gcloud
 ZONE=${KUBE_GCE_ZONE:-us-central1-b}
-MASTER_SIZE=g1-small
-MINION_SIZE=g1-small
+MASTER_SIZE=${MASTER_SIZE:-g1-small}
+MINION_SIZE=${MINION_SIZE:-g1-small}
 NUM_MINIONS=${NUM_MINIONS:-2}
 MINION_DISK_TYPE=pd-standard
-MINION_DISK_SIZE=100GB
+MINION_DISK_SIZE=${MINION_DISK_SIZE:-100GB}
 # TODO(dchen1107): Filed an internal issue to create an alias
 # for containervm image, so that gcloud will expand this
 # to the latest supported image.
@@ -33,10 +33,9 @@ INSTANCE_PREFIX="${KUBE_GCE_INSTANCE_PREFIX:-e2e-test-${USER}}"
 MASTER_NAME="${INSTANCE_PREFIX}-master"
 MASTER_TAG="${INSTANCE_PREFIX}-master"
 MINION_TAG="${INSTANCE_PREFIX}-minion"
-CLUSTER_IP_RANGE="10.245.0.0/16"
-MINION_IP_RANGES=($(eval echo "10.245.{1..${NUM_MINIONS}}.0/24"))
+CLUSTER_IP_RANGE="${KUBE_GCE_CLUSTER_CLASS_B:-10.245}.0.0/16"
+MINION_IP_RANGES=($(eval echo "${KUBE_GCE_CLUSTER_CLASS_B:-10.245}.{1..${NUM_MINIONS}}.0/24"))
 MASTER_IP_RANGE="${MASTER_IP_RANGE:-10.246.0.0/24}"
-
 MINION_SCOPES=("storage-ro" "compute-rw")
 # Increase the sleep interval value if concerned about API rate limits. 3, in seconds, is the default.
 POLL_SLEEP_INTERVAL=3

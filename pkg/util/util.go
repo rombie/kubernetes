@@ -24,6 +24,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"path"
 	"reflect"
@@ -65,7 +66,7 @@ func logPanic(r interface{}) {
 		}
 		callers = callers + fmt.Sprintf("%v:%v\n", file, line)
 	}
-	glog.Infof("Recovered from panic: %#v (%v)\n%v", r, r, callers)
+	glog.Errorf("Recovered from panic: %#v (%v)\n%v", r, r, callers)
 }
 
 // ErrorHandlers is a list of functions which will be invoked when an unreturnable
@@ -88,9 +89,13 @@ func logError(err error) {
 }
 
 // Forever loops forever running f every period.  Catches any panics, and keeps going.
+// Deprecated. Please use Until and pass NeverStop as the stopCh.
 func Forever(f func(), period time.Duration) {
 	Until(f, period, nil)
 }
+
+// NeverStop may be passed to Until to make it never stop.
+var NeverStop <-chan struct{} = make(chan struct{})
 
 // Until loops until stop channel is closed, running f every period.
 // Catches any panics, and keeps going. f may not be invoked if
@@ -407,12 +412,12 @@ func chooseHostInterfaceNativeGo() (net.IP, error) {
 	if i == len(intfs) {
 		return nil, err
 	}
-	glog.V(2).Infof("Choosing interface %s for from-host portals", intfs[i].Name)
+	glog.V(4).Infof("Choosing interface %s for from-host portals", intfs[i].Name)
 	addrs, err := intfs[i].Addrs()
 	if err != nil {
 		return nil, err
 	}
-	glog.V(2).Infof("Interface %s = %s", intfs[i].Name, addrs[0].String())
+	glog.V(4).Infof("Interface %s = %s", intfs[i].Name, addrs[0].String())
 	ip, _, err := net.ParseCIDR(addrs[0].String())
 	if err != nil {
 		return nil, err
@@ -486,4 +491,13 @@ func chooseHostInterfaceFromRoute(inFile io.Reader, nw networkInterfacer) (net.I
 		return nil, fmt.Errorf("Unable to select an IP.")
 	}
 	return nil, nil
+}
+
+func GetClient(req *http.Request) string {
+	if userAgent, ok := req.Header["User-Agent"]; ok {
+		if len(userAgent) > 0 {
+			return userAgent[0]
+		}
+	}
+	return "unknown"
 }

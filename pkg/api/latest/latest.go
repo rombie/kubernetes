@@ -26,10 +26,11 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta2"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/v1beta3"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
 // Version is the string that represents the current external default version.
-const Version = "v1beta1"
+const Version = "v1beta3"
 
 // OldestVersion is the string that represents the oldest server version supported,
 // for client code that wants to hardcode the lowest common denominator.
@@ -45,7 +46,7 @@ var Versions = []string{"v1beta1", "v1beta2", "v1beta3"}
 // the latest supported version.  Use this Codec when writing to
 // disk, a data store that is not dynamically versioned, or in tests.
 // This codec can decode any object that Kubernetes is aware of.
-var Codec = v1beta1.Codec
+var Codec = v1beta3.Codec
 
 // accessor is the shared static metadata accessor for the API.
 var accessor = meta.NewAccessor()
@@ -59,6 +60,9 @@ var SelfLinker = runtime.SelfLinker(accessor)
 // RESTMapper provides the default mapping between REST paths and the objects declared in api.Scheme and all known
 // Kubernetes versions.
 var RESTMapper meta.RESTMapper
+
+// userResources is a group of resources mostly used by a kubectl user
+var userResources = []string{"rc", "svc", "pods", "pvc"}
 
 // InterfacesFor returns the default Codec and ResourceVersioner for a given version
 // string, or an error if the version is not known.
@@ -117,14 +121,31 @@ func init() {
 	// the list of kinds that are scoped at the root of the api hierarchy
 	// if a kind is not enumerated here, it is assumed to have a namespace scope
 	kindToRootScope := map[string]bool{
-		"Node":      true,
-		"Minion":    true,
-		"Namespace": true,
+		"Node":             true,
+		"Minion":           true,
+		"Namespace":        true,
+		"PersistentVolume": true,
 	}
+
+	// setup aliases for groups of resources
+	mapper.AddResourceAlias("all", userResources...)
+
+	// these kinds should be excluded from the list of resources
+	ignoredKinds := util.NewStringSet(
+		"ListOptions",
+		"DeleteOptions",
+		"Status",
+		"ContainerManifest",
+		"PodLogOptions",
+		"PodExecOptions",
+		"PodProxyOptions")
 
 	// enumerate all supported versions, get the kinds, and register with the mapper how to address our resources
 	for _, version := range versions {
 		for kind := range api.Scheme.KnownTypes(version) {
+			if ignoredKinds.Has(kind) {
+				continue
+			}
 			mixedCase, found := versionMixedCase[version]
 			if !found {
 				mixedCase = false

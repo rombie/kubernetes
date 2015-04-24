@@ -34,6 +34,11 @@ import (
 	"github.com/coreos/go-etcd/etcd"
 )
 
+const (
+	PASS = iota
+	FAIL
+)
+
 // newStorage creates a REST storage backed by etcd helpers
 func newStorage(t *testing.T) (*REST, *tools.FakeEtcdClient) {
 	fakeEtcdClient := tools.NewFakeEtcdClient(t)
@@ -55,7 +60,7 @@ func createController(storage *REST, rc api.ReplicationController, t *testing.T)
 }
 
 var validPodTemplate = api.PodTemplate{
-	Spec: api.PodTemplateSpec{
+	Template: api.PodTemplateSpec{
 		ObjectMeta: api.ObjectMeta{
 			Labels: map[string]string{"a": "b"},
 		},
@@ -74,8 +79,8 @@ var validPodTemplate = api.PodTemplate{
 }
 
 var validControllerSpec = api.ReplicationControllerSpec{
-	Selector: validPodTemplate.Spec.Labels,
-	Template: &validPodTemplate.Spec,
+	Selector: validPodTemplate.Template.Labels,
+	Template: &validPodTemplate.Template,
 }
 
 var validController = api.ReplicationController{
@@ -134,9 +139,7 @@ func TestEtcdCreateControllerValidates(t *testing.T) {
 	storage, _ := newStorage(t)
 	emptyName := validController
 	emptyName.Name = ""
-	emptySelector := validController
-	emptySelector.Spec.Selector = map[string]string{}
-	failureCases := []api.ReplicationController{emptyName, emptySelector}
+	failureCases := []api.ReplicationController{emptyName}
 	for _, failureCase := range failureCases {
 		c, err := storage.Create(ctx, &failureCase)
 		if c != nil {
@@ -158,7 +161,7 @@ func TestCreateControllerWithGeneratedName(t *testing.T) {
 		Spec: api.ReplicationControllerSpec{
 			Replicas: 2,
 			Selector: map[string]string{"a": "b"},
-			Template: &validPodTemplate.Spec,
+			Template: &validPodTemplate.Template,
 		},
 	}
 
@@ -531,6 +534,87 @@ func TestEtcdWatchControllersMatch(t *testing.T) {
 	watching.Stop()
 }
 
+func TestEtcdWatchControllersFields(t *testing.T) {
+	ctx := api.WithNamespace(api.NewDefaultContext(), validController.Namespace)
+	storage, fakeClient := newStorage(t)
+	fakeClient.ExpectNotFoundGet(etcdgeneric.NamespaceKeyRootFunc(ctx, "/registry/pods"))
+
+	testFieldMap := map[int][]fields.Set{
+		PASS: {
+			{"status.replicas": "0"},
+			{"metadata.name": "foo"},
+			{"status.replicas": "0", "metadata.name": "foo"},
+		},
+		FAIL: {
+			{"status.replicas": "10"},
+			{"metadata.name": "bar"},
+			{"name": "foo"},
+			{"status.replicas": "10", "metadata.name": "foo"},
+			{"status.replicas": "0", "metadata.name": "bar"},
+		},
+	}
+	testEtcdActions := []string{
+		tools.EtcdCreate,
+		tools.EtcdSet,
+		tools.EtcdCAS,
+		tools.EtcdDelete}
+
+	controller := &api.ReplicationController{
+		ObjectMeta: api.ObjectMeta{
+			Name:      "foo",
+			Labels:    validController.Spec.Selector,
+			Namespace: "default",
+		},
+		Status: api.ReplicationControllerStatus{
+			Replicas: 0,
+		},
+	}
+	controllerBytes, _ := latest.Codec.Encode(controller)
+
+	for expectedResult, fieldSet := range testFieldMap {
+		for _, field := range fieldSet {
+			for _, action := range testEtcdActions {
+				watching, err := storage.Watch(ctx,
+					labels.Everything(),
+					field.AsSelector(),
+					"1",
+				)
+				var prevNode *etcd.Node = nil
+				node := &etcd.Node{
+					Value: string(controllerBytes),
+				}
+				if action == tools.EtcdDelete {
+					prevNode = node
+				}
+				fakeClient.WaitForWatchCompletion()
+				fakeClient.WatchResponse <- &etcd.Response{
+					Action:   action,
+					Node:     node,
+					PrevNode: prevNode,
+				}
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+
+				select {
+				case r, ok := <-watching.ResultChan():
+					if expectedResult == FAIL {
+						t.Errorf("Unexpected result from channel %#v", r)
+					}
+					if !ok {
+						t.Errorf("watching channel should be open")
+					}
+				case <-time.After(time.Millisecond * 100):
+					if expectedResult == PASS {
+						t.Error("unexpected timeout from result channel")
+					}
+				}
+				watching.Stop()
+			}
+		}
+	}
+}
+
 func TestEtcdWatchControllersNotMatch(t *testing.T) {
 	ctx := api.NewDefaultContext()
 	storage, fakeClient := newStorage(t)
@@ -579,7 +663,7 @@ func TestCreate(t *testing.T) {
 			Spec: api.ReplicationControllerSpec{
 				Replicas: 2,
 				Selector: map[string]string{"a": "b"},
-				Template: &validPodTemplate.Spec,
+				Template: &validPodTemplate.Template,
 			},
 		},
 		// invalid
@@ -587,7 +671,7 @@ func TestCreate(t *testing.T) {
 			Spec: api.ReplicationControllerSpec{
 				Replicas: 2,
 				Selector: map[string]string{},
-				Template: &validPodTemplate.Spec,
+				Template: &validPodTemplate.Template,
 			},
 		},
 	)

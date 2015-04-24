@@ -19,6 +19,7 @@ set -o nounset
 set -o pipefail
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
+source "${KUBE_ROOT}/cluster/common.sh"
 
 # --- Find local test binaries.
 
@@ -86,33 +87,13 @@ if [[ -z "${AUTH_CONFIG:-}" ]];  then
 
     detect-master >/dev/null
 
-
-    if [[ "$KUBERNETES_PROVIDER" == "vagrant" ]]; then
-      # When we are using vagrant it has hard coded auth.  We repeat that here so that
-      # we don't clobber auth that might be used for a publicly facing cluster.
-      auth_config=(
-        "--auth_config=${HOME}/.kubernetes_vagrant_auth"
-        "--kubeconfig=${HOME}/.kubernetes_vagrant_kubeconfig"
-      )
-    elif [[ "${KUBERNETES_PROVIDER}" == "gke" ]]; then
-      # With GKE, our auth and certs are in gcloud's config directory.
+    if [[ "${KUBERNETES_PROVIDER}" == "gke" ]]; then
+      # GKE stores its own kubeconfig in gcloud's config directory.
       detect-project &> /dev/null
-      cfg_dir="${GCLOUD_CONFIG_DIR}/${PROJECT}.${ZONE}.${CLUSTER_NAME}"
       auth_config=(
-        "--auth_config=${cfg_dir}/kubernetes_auth"
-        "--cert_dir=${cfg_dir}"
-      )
-    elif [[ "${KUBERNETES_PROVIDER}" == "gce" ]]; then
-      auth_config=(
-        "--kubeconfig=${HOME}/.kube/.kubeconfig"
-      )
-    elif [[ "${KUBERNETES_PROVIDER}" == "aws" ]]; then
-      auth_config=(
-        "--auth_config=${HOME}/.kube/${INSTANCE_PREFIX}/kubernetes_auth"
-      )
-    elif [[ "${KUBERNETES_PROVIDER}" == "libvirt-coreos" ]]; then
-      auth_config=(
-        "--kubeconfig=${HOME}/.kube/.kubeconfig"
+        "--kubeconfig=${GCLOUD_CONFIG_DIR}/kubeconfig"
+        # gcloud doesn't set the current-context, so we have to set it
+        "--context=gke_${PROJECT}_${ZONE}_${CLUSTER_NAME}"
       )
     elif [[ "${KUBERNETES_PROVIDER}" == "conformance_test" ]]; then
       auth_config=(
@@ -120,7 +101,9 @@ if [[ -z "${AUTH_CONFIG:-}" ]];  then
         "--cert_dir=${KUBERNETES_CONFORMANCE_TEST_CERT_DIR:-}"
       )
     else
-      auth_config=()
+      auth_config=(
+      "--kubeconfig=${KUBECONFIG:-$DEFAULT_KUBECONFIG}"
+    )
     fi
 else
   echo "Conformance Test.  No cloud-provider-specific preparation."

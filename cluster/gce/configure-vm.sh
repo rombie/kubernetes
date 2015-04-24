@@ -21,6 +21,8 @@ set -o pipefail
 # If we have any arguments at all, this is a push and not just setup.
 is_push=$@
 
+readonly KNOWN_TOKENS_FILE="/srv/salt-overlay/salt/kube-apiserver/known_tokens.csv"
+
 function ensure-install-dir() {
   INSTALL_DIR="/var/cache/kubernetes-install"
   mkdir -p ${INSTALL_DIR}
@@ -55,17 +57,6 @@ for k,v in yaml.load(sys.stdin).iteritems():
   print "readonly {var}={value}".format(var = k, value = pipes.quote(str(v)))
 ''' < "${kube_env_yaml}")
 
-  # We bake the KUBELET_TOKEN in separately to avoid auth information
-  # having to be re-communicated on kube-push. (Otherwise the client
-  # has to keep the bearer token around to handle generating a valid
-  # kube-env.)
-  if [[ -z "${KUBELET_TOKEN:-}" ]]; then
-    until KUBELET_TOKEN=$(curl-metadata kube-token); do
-      echo 'Waiting for metadata KUBELET_TOKEN...'
-      sleep 3
-    done
-  fi
-
   # Infer master status from presence in node pool
   if [[ $(hostname) = ${NODE_INSTANCE_PREFIX}* ]]; then
     KUBERNETES_MASTER="false"
@@ -73,30 +64,28 @@ for k,v in yaml.load(sys.stdin).iteritems():
     KUBERNETES_MASTER="true"
   fi
 
-  if [[ "${KUBERNETES_MASTER}" == "true" ]]; then
-    # TODO(zmerlynn): This block of code should disappear once #4561 & #4562 are done
-    if [[ -z "${KUBERNETES_NODE_NAMES:-}" ]]; then
-      until KUBERNETES_NODE_NAMES=$(curl-metadata kube-node-names); do
-        echo 'Waiting for metadata KUBERNETES_NODE_NAMES...'
-        sleep 3
-      done
-    fi
-  else
-    # And this should go away once the master can allocate CIDRs
-    if [[ -z "${MINION_IP_RANGE:-}" ]]; then
-      until MINION_IP_RANGE=$(curl-metadata node-ip-range); do
-        echo 'Waiting for metadata MINION_IP_RANGE...'
-        sleep 3
-      done
-    fi
+  if [[ "${KUBERNETES_MASTER}" != "true" ]] && [[ -z "${MINION_IP_RANGE:-}" ]]; then
+    # This block of code should go away once the master can allocate CIDRs
+    until MINION_IP_RANGE=$(curl-metadata node-ip-range); do
+      echo 'Waiting for metadata MINION_IP_RANGE...'
+      sleep 3
+    done
   fi
 }
 
 function remove-docker-artifacts() {
+  echo "== Deleting docker0 =="
+  # Forcibly install bridge-utils (options borrowed from Salt logs).
+  until apt-get -q -y -o DPkg::Options::=--force-confold -o DPkg::Options::=--force-confdef install bridge-utils; do
+    echo "== install of bridge-utils failed, retrying =="
+    sleep 5
+  done
+
   # Remove docker artifacts on minion nodes, if present
   iptables -t nat -F || true
   ifconfig docker0 down || true
   brctl delbr docker0 || true
+  echo "== Finished deleting docker0 =="
 }
 
 # Retry a download until we get it.
@@ -106,27 +95,36 @@ download-or-bust() {
   local -r url="$1"
   local -r file="${url##*/}"
   rm -f "$file"
-  until [[ -e "${1##*/}" ]]; do
-    echo "Downloading file ($1)"
-    curl --ipv4 -Lo "$file" --connect-timeout 20 --retry 6 --retry-delay 10 "$1"
+  until curl --ipv4 -Lo "$file" --connect-timeout 20 --retry 6 --retry-delay 10 "$1"; do
+    echo "Failed to download file ($1). Retrying."
   done
 }
 
 # Install salt from GCS.  See README.md for instructions on how to update these
 # debs.
 install-salt() {
-  apt-get update
+  echo "== Refreshing package database =="
+  until apt-get update; do
+    echo "== apt-get update failed, retrying =="
+    echo sleep 5
+  done
 
   mkdir -p /var/cache/salt-install
   cd /var/cache/salt-install
 
-  TARS=(
+  DEBS=(
     libzmq3_3.2.3+dfsg-1~bpo70~dst+1_amd64.deb
     python-zmq_13.1.0-1~bpo70~dst+1_amd64.deb
     salt-common_2014.1.13+ds-1~bpo70+1_all.deb
     salt-minion_2014.1.13+ds-1~bpo70+1_all.deb
   )
   URL_BASE="https://storage.googleapis.com/kubernetes-release/salt"
+
+  for deb in "${DEBS[@]}"; do
+    if [ ! -e "${deb}" ]; then
+      download-or-bust "${URL_BASE}/${deb}"
+    fi
+  done
 
   # Based on
   # https://major.io/2014/06/26/install-debian-packages-without-starting-daemons/
@@ -141,21 +139,29 @@ exit 101
 EOF
   chmod 0755 /usr/sbin/policy-rc.d
 
-  for tar in "${TARS[@]}"; do
-    download-or-bust "${URL_BASE}/${tar}"
-    dpkg -i "${tar}" || true
+  for deb in "${DEBS[@]}"; do
+    echo "== Installing ${deb}, ignore dependency complaints (will fix later) =="
+    dpkg --skip-same-version --force-depends -i "${deb}"
   done
 
   # This will install any of the unmet dependencies from above.
-  apt-get install -f -y
+  echo "== Installing unmet dependencies =="
+  until apt-get install -f -y; do
+    echo "== apt-get install failed, retrying =="
+    echo sleep 5
+  done
 
   rm /usr/sbin/policy-rc.d
+
+  # Log a timestamp
+  echo "== Finished installing Salt =="
 }
 
 # Ensure salt-minion never runs
 stop-salt-minion() {
   # This ensures it on next reboot
   echo manual > /etc/init/salt-minion.override
+  update-rc.d salt-minion disable
 
   if service salt-minion status >/dev/null; then
     echo "salt-minion started in defiance of runlevel policy, aborting startup." >&2
@@ -189,18 +195,21 @@ mount-master-pd() {
   mkdir -p /mnt/master-pd/srv/kubernetes
   # Contains the cluster's initial config parameters and auth tokens
   mkdir -p /mnt/master-pd/srv/salt-overlay
-  ln -s /mnt/master-pd/var/etcd /var/etcd
-  ln -s /mnt/master-pd/srv/kubernetes /srv/kubernetes
-  ln -s /mnt/master-pd/srv/salt-overlay /srv/salt-overlay
+
+  ln -s -f /mnt/master-pd/var/etcd /var/etcd
+  ln -s -f /mnt/master-pd/srv/kubernetes /srv/kubernetes
+  ln -s -f /mnt/master-pd/srv/salt-overlay /srv/salt-overlay
 
   # This is a bit of a hack to get around the fact that salt has to run after the
   # PD and mounted directory are already set up. We can't give ownership of the
   # directory to etcd until the etcd user and group exist, but they don't exist
   # until salt runs if we don't create them here. We could alternatively make the
   # permissions on the directory more permissive, but this seems less bad.
-  useradd -s /sbin/nologin -d /var/etcd etcd
-  chown etcd /mnt/master-pd/var/etcd
-  chgrp etcd /mnt/master-pd/var/etcd
+  if ! id etcd &>/dev/null; then
+    useradd -s /sbin/nologin -d /var/etcd etcd
+  fi
+  chown -R etcd /mnt/master-pd/var/etcd
+  chgrp -R etcd /mnt/master-pd/var/etcd
 }
 
 # Create the overlay files for the salt tree.  We create these in a separate
@@ -226,35 +235,52 @@ dns_server: '$(echo "$DNS_SERVER_IP" | sed -e "s/'/''/g")'
 dns_domain: '$(echo "$DNS_DOMAIN" | sed -e "s/'/''/g")'
 admission_control: '$(echo "$ADMISSION_CONTROL" | sed -e "s/'/''/g")'
 EOF
+}
 
-  if [[ "${KUBERNETES_MASTER}" == "true" ]]; then
-    cat <<EOF >>/srv/salt-overlay/pillar/cluster-params.sls
-gce_node_names: '$(echo "$KUBERNETES_NODE_NAMES" | sed -e "s/'/''/g")'
-EOF
+# This should only happen on cluster initialization. Uses
+# KUBE_BEARER_TOKEN, KUBELET_TOKEN, and /dev/urandom to generate
+# known_tokens.csv (KNOWN_TOKENS_FILE). After the first boot and
+# on upgrade, this file exists on the master-pd and should never
+# be touched again (except perhaps an additional service account,
+# see NB below.)
+function create-salt-auth() {
+  if [ ! -e "${KNOWN_TOKENS_FILE}" ]; then
+    mkdir -p /srv/salt-overlay/salt/kube-apiserver
+    (umask 077;
+      echo "${KUBE_BEARER_TOKEN},admin,admin" > "${KNOWN_TOKENS_FILE}";
+      echo "${KUBELET_TOKEN},kubelet,kubelet" >> "${KNOWN_TOKENS_FILE}")
+
+    mkdir -p /srv/salt-overlay/salt/kubelet
+    kubelet_auth_file="/srv/salt-overlay/salt/kubelet/kubernetes_auth"
+    (umask 077;
+      echo "{\"BearerToken\": \"${KUBELET_TOKEN}\", \"Insecure\": true }" > "${kubelet_auth_file}")
+
+    # Generate tokens for other "service accounts".  Append to known_tokens.
+    #
+    # NB: If this list ever changes, this script actually has to
+    # change to detect the existence of this file, kill any deleted
+    # old tokens and add any new tokens (to handle the upgrade case).
+    local -r service_accounts=("system:scheduler" "system:controller_manager" "system:logging" "system:monitoring" "system:dns")
+    for account in "${service_accounts[@]}"; do
+      token=$(dd if=/dev/urandom bs=128 count=1 2>/dev/null | base64 | tr -d "=+/" | dd bs=32 count=1 2>/dev/null)
+      echo "${token},${account},${account}" >> "${KNOWN_TOKENS_FILE}"
+    done
   fi
 }
 
-# This should only happen on cluster initialization
-function create-salt-auth() {
-  mkdir -p /srv/salt-overlay/salt/nginx
-  echo "${MASTER_HTPASSWD}" > /srv/salt-overlay/salt/nginx/htpasswd
-
-  mkdir -p /srv/salt-overlay/salt/kube-apiserver
-  known_tokens_file="/srv/salt-overlay/salt/kube-apiserver/known_tokens.csv"
-  (umask 077;
-    echo "${KUBELET_TOKEN},kubelet,kubelet" > "${known_tokens_file}")
-
-  mkdir -p /srv/salt-overlay/salt/kubelet
-  kubelet_auth_file="/srv/salt-overlay/salt/kubelet/kubernetes_auth"
-  (umask 077;
-    echo "{\"BearerToken\": \"${KUBELET_TOKEN}\", \"Insecure\": true }" > "${kubelet_auth_file}")
-}
-
 function download-release() {
+  # TODO(zmerlynn): We should optimize for the reboot case here, but
+  # unlike the .debs, we don't have version information in the
+  # filenames here, nor do the URLs even provide useful information in
+  # the dev environment case (because they're just a project
+  # bucket). We should probably push a hash into the kube-env, and
+  # store it when we download, and then when it's different infer that
+  # a push occurred (otherwise it's a simple reboot).
+
   echo "Downloading binary release tar ($SERVER_BINARY_TAR_URL)"
   download-or-bust "$SERVER_BINARY_TAR_URL"
 
-  echo "Downloading binary release tar ($SALT_TAR_URL)"
+  echo "Downloading Salt tar ($SALT_TAR_URL)"
   download-or-bust "$SALT_TAR_URL"
 
   echo "Unpacking Salt tree"
@@ -294,6 +320,16 @@ grains:
   cbr-cidr: ${MASTER_IP_RANGE}
   cloud: gce
 EOF
+  if ! [[ -z "${PROJECT_ID:-}" ]] && ! [[ -z "${TOKEN_URL:-}" ]]; then
+    cat <<EOF >/etc/gce.conf
+[global]
+token-url = ${TOKEN_URL}
+project-id = ${PROJECT_ID}
+EOF
+    cat <<EOF >>/etc/salt/minion.d/grains.conf
+  cloud_config: /etc/gce.conf
+EOF
+  fi
 }
 
 function salt-node-role() {
@@ -328,15 +364,14 @@ EOF
 }
 
 function salt-set-apiserver() {
-  local kube_master_ip
-  until kube_master_ip=$(getent hosts ${KUBERNETES_MASTER_NAME} | cut -f1 -d\ ); do
+  local kube_master_fqdn
+  until kube_master_fqdn=$(getent hosts ${KUBERNETES_MASTER_NAME} | awk '{ print $2 }'); do
     echo 'Waiting for DNS resolution of ${KUBERNETES_MASTER_NAME}...'
     sleep 3
   done
 
   cat <<EOF >>/etc/salt/minion.d/grains.conf
-  api_servers: '${kube_master_ip}'
-  apiservers: '${kube_master_ip}'
+  api_servers: '${kube_master_fqdn}'
 EOF
 }
 
@@ -356,6 +391,7 @@ function configure-salt() {
 }
 
 function run-salt() {
+  echo "== Calling Salt =="
   salt-call --local state.highstate || true
 }
 

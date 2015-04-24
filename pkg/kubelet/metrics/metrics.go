@@ -20,8 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
+	kubecontainer "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/container"
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -71,7 +70,7 @@ var (
 var registerMetrics sync.Once
 
 // Register all metrics.
-func Register(containerCache dockertools.DockerCache) {
+func Register(containerCache kubecontainer.RuntimeCache) {
 	// Register the metrics.
 	registerMetrics.Do(func() {
 		prometheus.MustRegister(ImagePullLatency)
@@ -91,8 +90,8 @@ const (
 	SyncPodSync
 )
 
-func (self SyncPodType) String() string {
-	switch self {
+func (sp SyncPodType) String() string {
+	switch sp {
 	case SyncPodCreate:
 		return "create"
 	case SyncPodUpdate:
@@ -109,7 +108,7 @@ func SinceInMicroseconds(start time.Time) float64 {
 	return float64(time.Since(start).Nanoseconds() / time.Microsecond.Nanoseconds())
 }
 
-func newPodAndContainerCollector(containerCache dockertools.DockerCache) *podAndContainerCollector {
+func newPodAndContainerCollector(containerCache kubecontainer.RuntimeCache) *podAndContainerCollector {
 	return &podAndContainerCollector{
 		containerCache: containerCache,
 	}
@@ -118,7 +117,7 @@ func newPodAndContainerCollector(containerCache dockertools.DockerCache) *podAnd
 // Custom collector for current pod and container counts.
 type podAndContainerCollector struct {
 	// Cache for accessing information about running containers.
-	containerCache dockertools.DockerCache
+	containerCache kubecontainer.RuntimeCache
 }
 
 // TODO(vmarmol): Split by source?
@@ -133,28 +132,22 @@ var (
 		nil, nil)
 )
 
-func (self *podAndContainerCollector) Describe(ch chan<- *prometheus.Desc) {
+func (pc *podAndContainerCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- runningPodCountDesc
 	ch <- runningContainerCountDesc
 }
 
-func (self *podAndContainerCollector) Collect(ch chan<- prometheus.Metric) {
-	runningContainers, err := self.containerCache.RunningContainers()
+func (pc *podAndContainerCollector) Collect(ch chan<- prometheus.Metric) {
+	runningPods, err := pc.containerCache.GetPods()
 	if err != nil {
 		glog.Warning("Failed to get running container information while collecting metrics: %v", err)
 		return
 	}
 
-	// Get a set of running pods.
-	runningPods := make(map[types.UID]struct{})
-	for _, cont := range runningContainers {
-		containerName, _, err := dockertools.ParseDockerName(cont.Names[0])
-		if err != nil {
-			continue
-		}
-		runningPods[containerName.PodUID] = struct{}{}
+	runningContainers := 0
+	for _, p := range runningPods {
+		runningContainers += len(p.Containers)
 	}
-
 	ch <- prometheus.MustNewConstMetric(
 		runningPodCountDesc,
 		prometheus.GaugeValue,
@@ -162,5 +155,5 @@ func (self *podAndContainerCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		runningContainerCountDesc,
 		prometheus.GaugeValue,
-		float64(len(runningContainers)))
+		float64(runningContainers))
 }

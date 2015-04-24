@@ -2,7 +2,7 @@
 
 ## Overview
 
-Kubernetes [`Pods`](Pods.md) are mortal. They are born and they die, and they
+Kubernetes [`Pods`](pods.md) are mortal. They are born and they die, and they
 are not resurrected.  [`ReplicationControllers`](replication-controller.md) in
 particular create and destroy `Pods` dynamically (e.g. when scaling up or down
 or when doing rolling updates).  While each `Pod` gets its own IP address, even
@@ -21,7 +21,7 @@ Selector`](labels.md).
 
 As an example, consider an image-processing backend which is running with 3
 replicas.  Those replicas are fungible - frontends do not care which backend
-they use.  While the actual `Pods` that comprise the backend set may change, the
+they use.  While the actual `Pods` that compose the backend set may change, the
 frontend clients should not need to manage that themselves.  The `Service`
 abstraction enables this decoupling.
 

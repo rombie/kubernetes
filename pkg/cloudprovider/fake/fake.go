@@ -29,8 +29,14 @@ type FakeBalancer struct {
 	Name       string
 	Region     string
 	ExternalIP net.IP
-	Port       int
+	Ports      []int
 	Hosts      []string
+}
+
+type FakeUpdateBalancerCall struct {
+	Name   string
+	Region string
+	Hosts  []string
 }
 
 // FakeCloud is a test-double implementation of Interface, TCPLoadBalancer and Instances. It is useful for testing.
@@ -46,7 +52,7 @@ type FakeCloud struct {
 	MasterName    string
 	ExternalIP    net.IP
 	Balancers     []FakeBalancer
-
+	UpdateCalls   []FakeUpdateBalancerCall
 	cloudprovider.Zone
 }
 
@@ -95,9 +101,9 @@ func (f *FakeCloud) TCPLoadBalancerExists(name, region string) (bool, error) {
 
 // CreateTCPLoadBalancer is a test-spy implementation of TCPLoadBalancer.CreateTCPLoadBalancer.
 // It adds an entry "create" into the internal method call record.
-func (f *FakeCloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP, port int, hosts []string, affinityType api.AffinityType) (string, error) {
+func (f *FakeCloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP, ports []int, hosts []string, affinityType api.AffinityType) (string, error) {
 	f.addCall("create")
-	f.Balancers = append(f.Balancers, FakeBalancer{name, region, externalIP, port, hosts})
+	f.Balancers = append(f.Balancers, FakeBalancer{name, region, externalIP, ports, hosts})
 	return f.ExternalIP.String(), f.Err
 }
 
@@ -105,6 +111,7 @@ func (f *FakeCloud) CreateTCPLoadBalancer(name, region string, externalIP net.IP
 // It adds an entry "update" into the internal method call record.
 func (f *FakeCloud) UpdateTCPLoadBalancer(name, region string, hosts []string) error {
 	f.addCall("update")
+	f.UpdateCalls = append(f.UpdateCalls, FakeUpdateBalancerCall{name, region, hosts})
 	return f.Err
 }
 

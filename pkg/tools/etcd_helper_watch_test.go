@@ -207,7 +207,13 @@ func TestWatchEtcdError(t *testing.T) {
 	fakeClient.WatchImmediateError = fmt.Errorf("immediate error")
 	h := EtcdHelper{fakeClient, codec, versioner}
 
-	got := <-h.Watch("/some/key", 4).ResultChan()
+	watching, err := h.Watch("/some/key", 4, Everything)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	defer watching.Stop()
+
+	got := <-watching.ResultChan()
 	if got.Type != watch.Error {
 		t.Fatalf("Unexpected non-error")
 	}
@@ -229,7 +235,10 @@ func TestWatch(t *testing.T) {
 	fakeClient.expectNotFoundGetSet["/some/key"] = struct{}{}
 	h := EtcdHelper{fakeClient, codec, versioner}
 
-	watching := h.Watch("/some/key", 0)
+	watching, err := h.Watch("/some/key", 0, Everything)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 
 	fakeClient.WaitForWatchCompletion()
 	// when server returns not found, the watch index starts at the next value (1)
@@ -278,11 +287,22 @@ func TestWatch(t *testing.T) {
 	}
 }
 
+func emptySubsets() []api.EndpointSubset {
+	return []api.EndpointSubset{}
+}
+
+func makeSubsets(ip string, port int) []api.EndpointSubset {
+	return []api.EndpointSubset{{
+		Addresses: []api.EndpointAddress{{IP: ip}},
+		Ports:     []api.EndpointPort{{Port: port}},
+	}}
+}
+
 func TestWatchEtcdState(t *testing.T) {
 	codec := latest.Codec
 	type T struct {
 		Type      watch.EventType
-		Endpoints []api.Endpoint
+		Endpoints []api.EndpointSubset
 	}
 	testCases := map[string]struct {
 		Initial   map[string]EtcdResponseWithError
@@ -296,7 +316,10 @@ func TestWatchEtcdState(t *testing.T) {
 				{
 					Action: "create",
 					Node: &etcd.Node{
-						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []api.Endpoint{}})),
+						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{
+							ObjectMeta: api.ObjectMeta{Name: "foo"},
+							Subsets:    emptySubsets(),
+						})),
 					},
 				},
 			},
@@ -310,12 +333,18 @@ func TestWatchEtcdState(t *testing.T) {
 				{
 					Action: "compareAndSwap",
 					Node: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []api.Endpoint{{IP: "127.0.0.1", Port: 9000}}})),
+						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{
+							ObjectMeta: api.ObjectMeta{Name: "foo"},
+							Subsets:    makeSubsets("127.0.0.1", 9000),
+						})),
 						CreatedIndex:  1,
 						ModifiedIndex: 2,
 					},
 					PrevNode: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []api.Endpoint{}})),
+						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{
+							ObjectMeta: api.ObjectMeta{Name: "foo"},
+							Subsets:    emptySubsets(),
+						})),
 						CreatedIndex:  1,
 						ModifiedIndex: 1,
 					},
@@ -323,7 +352,7 @@ func TestWatchEtcdState(t *testing.T) {
 			},
 			From: 1,
 			Expected: []*T{
-				{watch.Modified, []api.Endpoint{{IP: "127.0.0.1", Port: 9000}}},
+				{watch.Modified, makeSubsets("127.0.0.1", 9000)},
 			},
 		},
 		"from initial state": {
@@ -332,7 +361,10 @@ func TestWatchEtcdState(t *testing.T) {
 					R: &etcd.Response{
 						Action: "get",
 						Node: &etcd.Node{
-							Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []api.Endpoint{}})),
+							Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{
+								ObjectMeta: api.ObjectMeta{Name: "foo"},
+								Subsets:    emptySubsets(),
+							})),
 							CreatedIndex:  1,
 							ModifiedIndex: 1,
 						},
@@ -345,12 +377,18 @@ func TestWatchEtcdState(t *testing.T) {
 				{
 					Action: "compareAndSwap",
 					Node: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []api.Endpoint{{IP: "127.0.0.1", Port: 9000}}})),
+						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{
+							ObjectMeta: api.ObjectMeta{Name: "foo"},
+							Subsets:    makeSubsets("127.0.0.1", 9000),
+						})),
 						CreatedIndex:  1,
 						ModifiedIndex: 2,
 					},
 					PrevNode: &etcd.Node{
-						Value:         string(runtime.EncodeOrDie(codec, &api.Endpoints{ObjectMeta: api.ObjectMeta{Name: "foo"}, Endpoints: []api.Endpoint{}})),
+						Value: string(runtime.EncodeOrDie(codec, &api.Endpoints{
+							ObjectMeta: api.ObjectMeta{Name: "foo"},
+							Subsets:    emptySubsets(),
+						})),
 						CreatedIndex:  1,
 						ModifiedIndex: 1,
 					},
@@ -358,7 +396,7 @@ func TestWatchEtcdState(t *testing.T) {
 			},
 			Expected: []*T{
 				{watch.Added, nil},
-				{watch.Modified, []api.Endpoint{{IP: "127.0.0.1", Port: 9000}}},
+				{watch.Modified, makeSubsets("127.0.0.1", 9000)},
 			},
 		},
 	}
@@ -369,7 +407,11 @@ func TestWatchEtcdState(t *testing.T) {
 			fakeClient.Data[key] = value
 		}
 		h := EtcdHelper{fakeClient, codec, versioner}
-		watching := h.Watch("/somekey/foo", testCase.From)
+		watching, err := h.Watch("/somekey/foo", testCase.From, Everything)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+
 		fakeClient.WaitForWatchCompletion()
 
 		t.Logf("Testing %v", k)
@@ -382,7 +424,7 @@ func TestWatchEtcdState(t *testing.T) {
 				t.Errorf("%s: expected type %v, got %v", k, e, a)
 				break
 			}
-			if e, a := testCase.Expected[i].Endpoints, event.Object.(*api.Endpoints).Endpoints; !api.Semantic.DeepDerivative(e, a) {
+			if e, a := testCase.Expected[i].Endpoints, event.Object.(*api.Endpoints).Subsets; !api.Semantic.DeepDerivative(e, a) {
 				t.Errorf("%s: expected type %v, got %v", k, e, a)
 				break
 			}
@@ -437,7 +479,10 @@ func TestWatchFromZeroIndex(t *testing.T) {
 		fakeClient.Data["/some/key"] = testCase.Response
 		h := EtcdHelper{fakeClient, codec, versioner}
 
-		watching := h.Watch("/some/key", 0)
+		watching, err := h.Watch("/some/key", 0, Everything)
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
 
 		fakeClient.WaitForWatchCompletion()
 		if e, a := testCase.Response.R.EtcdIndex+1, fakeClient.WatchIndex; e != a {
@@ -583,7 +628,10 @@ func TestWatchFromNotFound(t *testing.T) {
 	}
 	h := EtcdHelper{fakeClient, codec, versioner}
 
-	watching := h.Watch("/some/key", 0)
+	watching, err := h.Watch("/some/key", 0, Everything)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 
 	fakeClient.WaitForWatchCompletion()
 	if fakeClient.WatchIndex != 3 {
@@ -606,7 +654,10 @@ func TestWatchFromOtherError(t *testing.T) {
 	}
 	h := EtcdHelper{fakeClient, codec, versioner}
 
-	watching := h.Watch("/some/key", 0)
+	watching, err := h.Watch("/some/key", 0, Everything)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
 
 	errEvent := <-watching.ResultChan()
 	if e, a := watch.Error, errEvent.Type; e != a {
@@ -636,7 +687,11 @@ func TestWatchPurposefulShutdown(t *testing.T) {
 	fakeClient.expectNotFoundGetSet["/some/key"] = struct{}{}
 
 	// Test purposeful shutdown
-	watching := h.Watch("/some/key", 0)
+	watching, err := h.Watch("/some/key", 0, Everything)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
 	fakeClient.WaitForWatchCompletion()
 	watching.Stop()
 

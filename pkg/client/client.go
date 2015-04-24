@@ -41,6 +41,9 @@ type Interface interface {
 	ResourceQuotasNamespacer
 	SecretsNamespacer
 	NamespacesInterface
+	PersistentVolumesInterface
+	PersistentVolumeClaimsNamespacer
+	ComponentStatusesInterface
 }
 
 func (c *Client) ReplicationControllers(namespace string) ReplicationControllerInterface {
@@ -66,7 +69,6 @@ func (c *Client) Pods(namespace string) PodInterface {
 func (c *Client) Services(namespace string) ServiceInterface {
 	return newServices(c, namespace)
 }
-
 func (c *Client) LimitRanges(namespace string) LimitRangeInterface {
 	return newLimitRanges(c, namespace)
 }
@@ -81,6 +83,18 @@ func (c *Client) Secrets(namespace string) SecretsInterface {
 
 func (c *Client) Namespaces() NamespaceInterface {
 	return newNamespaces(c)
+}
+
+func (c *Client) PersistentVolumes() PersistentVolumeInterface {
+	return newPersistentVolumes(c)
+}
+
+func (c *Client) PersistentVolumeClaims(namespace string) PersistentVolumeClaimInterface {
+	return newPersistentVolumeClaims(c, namespace)
+}
+
+func (c *Client) ComponentStatuses() ComponentStatusInterface {
+	return newComponentStatuses(c)
 }
 
 // VersionInterface has a method to retrieve the server version.
@@ -126,6 +140,25 @@ func (c *Client) ServerAPIVersions() (*api.APIVersions, error) {
 		return nil, fmt.Errorf("got '%s': %v", string(body), err)
 	}
 	return &v, nil
+}
+
+type ComponentValidatorInterface interface {
+	ValidateComponents() (*api.ComponentStatusList, error)
+}
+
+// ValidateComponents retrieves and parses the master's self-monitored cluster state.
+// TODO: This should hit the versioned endpoint when that is implemented.
+func (c *Client) ValidateComponents() (*api.ComponentStatusList, error) {
+	body, err := c.Get().AbsPath("/validate").DoRaw()
+	if err != nil {
+		return nil, err
+	}
+
+	statuses := []api.ComponentStatus{}
+	if err := json.Unmarshal(body, &statuses); err != nil {
+		return nil, fmt.Errorf("got '%s': %v", string(body), err)
+	}
+	return &api.ComponentStatusList{Items: statuses}, nil
 }
 
 // IsTimeout tests if this is a timeout error in the underlying transport.

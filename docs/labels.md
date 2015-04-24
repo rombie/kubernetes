@@ -32,7 +32,7 @@ These are just examples; you are free to develop your own conventions.
 
 ## Syntax and character set
 
-As already mentioned, well formed _labels_ are key value pairs. Valid label keys are comprised of two segments - prefix and name - separated by a slash (`/`).  The name segment is required and must be a DNS label: 63 characters or less, all lowercase, beginning and ending with an alphanumeric character (`[a-z0-9A-Z]`), with dashes (`-`) and alphanumerics between.  The prefix and slash are optional.  If specified, the prefix must be a DNS subdomain (a series of DNS labels separated by dots (`.`), not longer than 253 characters in total.
+As already mentioned, well formed _labels_ are key value pairs. Valid label keys have two segments - prefix and name - separated by a slash (`/`).  The name segment is required and must be a DNS label: 63 characters or less, all lowercase, beginning and ending with an alphanumeric character (`[a-z0-9A-Z]`), with dashes (`-`) and alphanumerics between.  The prefix and slash are optional.  If specified, the prefix must be a DNS subdomain (a series of DNS labels separated by dots (`.`), not longer than 253 characters in total.
 If the prefix is omitted, the label key is presumed to be private to the user. System components which use labels must specify a prefix.  The `kubernetes.io` prefix is reserved for kubernetes core components.
 
 Valid label values must be shorter than 64 characters, accepted characters are (`[-A-Za-z0-9_.]`) but the first character must be  (`[A-Za-z0-9]`).
@@ -80,8 +80,8 @@ _Set-based_ requirements can be mixed with _equality-based_ requirements. For ex
 ## API
 
 LIST and WATCH operations may specify label selectors to filter the sets of objects returned using a query parameter. Both requirements are permitted:
-   - _equality-based_ requirements: `?labels=key1%3Dvalue1,key2%3Dvalue2`
-   - _set-based_ requirements: `?labels=key+in+%28value1%2Cvalue2%29%2Ckey2+notin+%28value3`
+   - _equality-based_ requirements: `?label-selector=key1%3Dvalue1,key2%3Dvalue2`
+   - _set-based_ requirements: `?label-selector=key+in+%28value1%2Cvalue2%29%2Ckey2+notin+%28value3`
 
 Kubernetes also currently supports two objects that use label selectors to keep track of their members, `service`s and `replicationController`s:
 - `service`: A [service](/docs/services.md) is a configuration unit for the proxies that run on every worker node.  It is named and points to one or more pods.

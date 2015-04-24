@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
@@ -42,14 +43,22 @@ func (rcStrategy) NamespaceScoped() bool {
 	return true
 }
 
-// ResetBeforeCreate clears the status of a replication controller before creation.
-func (rcStrategy) ResetBeforeCreate(obj runtime.Object) {
+// PrepareForCreate clears the status of a replication controller before creation.
+func (rcStrategy) PrepareForCreate(obj runtime.Object) {
 	controller := obj.(*api.ReplicationController)
 	controller.Status = api.ReplicationControllerStatus{}
 }
 
+// PrepareForUpdate clears fields that are not allowed to be set by end users on update.
+func (rcStrategy) PrepareForUpdate(obj, old runtime.Object) {
+	// TODO: once RC has a status sub-resource we can enable this.
+	//newController := obj.(*api.ReplicationController)
+	//oldController := old.(*api.ReplicationController)
+	//newController.Status = oldController.Status
+}
+
 // Validate validates a new replication controller.
-func (rcStrategy) Validate(obj runtime.Object) fielderrors.ValidationErrorList {
+func (rcStrategy) Validate(ctx api.Context, obj runtime.Object) fielderrors.ValidationErrorList {
 	controller := obj.(*api.ReplicationController)
 	return validation.ValidateReplicationController(controller)
 }
@@ -61,23 +70,33 @@ func (rcStrategy) AllowCreateOnUpdate() bool {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (rcStrategy) ValidateUpdate(obj, old runtime.Object) fielderrors.ValidationErrorList {
-	return validation.ValidateReplicationControllerUpdate(old.(*api.ReplicationController), obj.(*api.ReplicationController))
+func (rcStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) fielderrors.ValidationErrorList {
+	validationErrorList := validation.ValidateReplicationController(obj.(*api.ReplicationController))
+	updateErrorList := validation.ValidateReplicationControllerUpdate(old.(*api.ReplicationController), obj.(*api.ReplicationController))
+	return append(validationErrorList, updateErrorList...)
+}
+
+// ControllerToSelectableFields returns a label set that represents the object.
+func ControllerToSelectableFields(controller *api.ReplicationController) fields.Set {
+	return fields.Set{
+		"metadata.name":   controller.Name,
+		"status.replicas": strconv.Itoa(controller.Status.Replicas),
+	}
 }
 
 // MatchController is the filter used by the generic etcd backend to route
 // watch events from etcd to clients of the apiserver only interested in specific
 // labels/fields.
 func MatchController(label labels.Selector, field fields.Selector) generic.Matcher {
-	return generic.MatcherFunc(
-		func(obj runtime.Object) (bool, error) {
-			if !field.Empty() {
-				return false, fmt.Errorf("field selector not supported yet")
-			}
-			controllerObj, ok := obj.(*api.ReplicationController)
+	return &generic.SelectionPredicate{
+		Label: label,
+		Field: field,
+		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
+			rc, ok := obj.(*api.ReplicationController)
 			if !ok {
-				return false, fmt.Errorf("Given object is not a replication controller.")
+				return nil, nil, fmt.Errorf("Given object is not a replication controller.")
 			}
-			return label.Matches(labels.Set(controllerObj.Labels)), nil
-		})
+			return labels.Set(rc.ObjectMeta.Labels), ControllerToSelectableFields(rc), nil
+		},
+	}
 }

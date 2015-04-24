@@ -42,7 +42,7 @@ func MakeMinionList(minions []string, nodeResources api.NodeResources) *api.Node
 	}
 	for i := range minions {
 		list.Items[i].Name = minions[i]
-		list.Items[i].Spec.Capacity = nodeResources.Capacity
+		list.Items[i].Status.Capacity = nodeResources.Capacity
 	}
 	return &list
 }
@@ -59,7 +59,7 @@ func (r *MinionRegistry) SetError(err error) {
 	r.Err = err
 }
 
-func (r *MinionRegistry) ListMinions(ctx api.Context) (*api.NodeList, error) {
+func (r *MinionRegistry) ListMinions(ctx api.Context, label labels.Selector, field fields.Selector) (*api.NodeList, error) {
 	r.Lock()
 	defer r.Unlock()
 	return &r.Minions, r.Err

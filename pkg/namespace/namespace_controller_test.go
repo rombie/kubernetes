@@ -18,10 +18,11 @@ package namespace
 
 import (
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/cache"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 )
 
@@ -41,7 +42,7 @@ func TestFinalized(t *testing.T) {
 }
 
 func TestFinalize(t *testing.T) {
-	mockClient := &client.Fake{}
+	mockClient := &testclient.Fake{}
 	testNamespace := api.Namespace{
 		ObjectMeta: api.ObjectMeta{
 			Name:            "test",
@@ -58,11 +59,17 @@ func TestFinalize(t *testing.T) {
 	if mockClient.Actions[0].Action != "finalize-namespace" {
 		t.Errorf("Expected finalize-namespace action %v", mockClient.Actions[0].Action)
 	}
+	finalizers := mockClient.Actions[0].Value.(*api.Namespace).Spec.Finalizers
+	if len(finalizers) != 1 {
+		t.Errorf("There should be a single finalizer remaining")
+	}
+	if "other" != string(finalizers[0]) {
+		t.Errorf("Unexpected finalizer value, %v", finalizers[0])
+	}
 }
 
 func TestSyncNamespaceThatIsTerminating(t *testing.T) {
-	mockClient := &client.Fake{}
-	nm := NamespaceManager{kubeClient: mockClient, store: cache.NewStore(cache.MetaNamespaceKeyFunc)}
+	mockClient := &testclient.Fake{}
 	now := util.Now()
 	testNamespace := api.Namespace{
 		ObjectMeta: api.ObjectMeta{
@@ -77,7 +84,7 @@ func TestSyncNamespaceThatIsTerminating(t *testing.T) {
 			Phase: api.NamespaceTerminating,
 		},
 	}
-	err := nm.syncNamespace(testNamespace)
+	err := syncNamespace(mockClient, testNamespace)
 	if err != nil {
 		t.Errorf("Unexpected error when synching namespace %v", err)
 	}
@@ -85,7 +92,7 @@ func TestSyncNamespaceThatIsTerminating(t *testing.T) {
 		"list-services",
 		"list-pods",
 		"list-resourceQuotas",
-		"list-controllers",
+		"list-replicationControllers",
 		"list-secrets",
 		"list-limitRanges",
 		"list-events",
@@ -101,8 +108,7 @@ func TestSyncNamespaceThatIsTerminating(t *testing.T) {
 }
 
 func TestSyncNamespaceThatIsActive(t *testing.T) {
-	mockClient := &client.Fake{}
-	nm := NamespaceManager{kubeClient: mockClient, store: cache.NewStore(cache.MetaNamespaceKeyFunc)}
+	mockClient := &testclient.Fake{}
 	testNamespace := api.Namespace{
 		ObjectMeta: api.ObjectMeta{
 			Name:            "test",
@@ -115,7 +121,7 @@ func TestSyncNamespaceThatIsActive(t *testing.T) {
 			Phase: api.NamespaceActive,
 		},
 	}
-	err := nm.syncNamespace(testNamespace)
+	err := syncNamespace(mockClient, testNamespace)
 	if err != nil {
 		t.Errorf("Unexpected error when synching namespace %v", err)
 	}
@@ -125,5 +131,27 @@ func TestSyncNamespaceThatIsActive(t *testing.T) {
 	}
 	if len(actionSet) != 0 {
 		t.Errorf("Expected no action from controller, but got: %v", actionSet)
+	}
+}
+
+func TestRunStop(t *testing.T) {
+	o := testclient.NewObjects(api.Scheme)
+	client := &testclient.Fake{ReactFn: testclient.ObjectReaction(o, latest.RESTMapper)}
+	nsMgr := NewNamespaceManager(client, 1*time.Second)
+
+	if nsMgr.StopEverything != nil {
+		t.Errorf("Non-running manager should not have a stop channel.  Got %v", nsMgr.StopEverything)
+	}
+
+	nsMgr.Run()
+
+	if nsMgr.StopEverything == nil {
+		t.Errorf("Running manager should have a stop channel.  Got nil")
+	}
+
+	nsMgr.Stop()
+
+	if nsMgr.StopEverything != nil {
+		t.Errorf("Non-running manager should not have a stop channel.  Got %v", nsMgr.StopEverything)
 	}
 }

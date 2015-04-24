@@ -2,7 +2,7 @@
   "apiVersion": "v1beta3",
   "kind": "LimitRange",
   "metadata": {
-    "name": "limits",
+    "name": "limits"
   },
   "spec": {
     "limits": [
@@ -10,10 +10,10 @@
       "type": "Pod",
       "max": {
         "memory": "1Gi",
-        "cpu": "2",
+        "cpu": "2"
       },
       "min": {
-        "memory": "1Mi",
+        "memory": "5Mi",
         "cpu": "250m"
       }
     },
@@ -21,13 +21,17 @@
       "type": "Container",
       "max": {
         "memory": "1Gi",
-        "cpu": "2",
+        "cpu": "2"
       },
       "min": {
-        "memory": "1Mi",
+        "memory": "5Mi",
         "cpu": "250m"
-      }
-    },
-    ],
+      },
+      "default": {
+        "memory": "5Mi",
+        "cpu": "250m"
+      }       
+    }
+    ]
   }
 }

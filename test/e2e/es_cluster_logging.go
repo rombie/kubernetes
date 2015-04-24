@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 
 	. "github.com/onsi/ginkgo"
@@ -56,12 +57,11 @@ func bodyToJSON(body []byte) (map[string]interface{}, error) {
 
 // ClusterLevelLoggingWithElasticsearch is an end to end test for cluster level logging.
 func ClusterLevelLoggingWithElasticsearch(c *client.Client) {
-
 	// TODO: For now assume we are only testing cluster logging with Elasticsearch
 	// on GCE. Once we are sure that Elasticsearch cluster level logging
 	// works for other providers we should widen this scope of this test.
-	if testContext.provider != "gce" {
-		Logf("Skipping cluster level logging test for provider %s", testContext.provider)
+	if !providerIs("gce") {
+		Logf("Skipping cluster level logging test for provider %s", testContext.Provider)
 		return
 	}
 
@@ -71,7 +71,7 @@ func ClusterLevelLoggingWithElasticsearch(c *client.Client) {
 	// Make a few attempts to connect. This makes the test robust against
 	// being run as the first e2e test just after the e2e cluster has been created.
 	var err error
-	const graceTime = 5 * time.Minute
+	const graceTime = 10 * time.Minute
 	for start := time.Now(); time.Since(start) < graceTime; time.Sleep(5 * time.Second) {
 		if _, err = s.Get("elasticsearch-logging"); err == nil {
 			break
@@ -83,7 +83,7 @@ func ClusterLevelLoggingWithElasticsearch(c *client.Client) {
 	// Wait for the Elasticsearch pods to enter the running state.
 	By("Checking to make sure the Elasticsearch pods are running")
 	label := labels.SelectorFromSet(labels.Set(map[string]string{"name": "elasticsearch-logging"}))
-	pods, err := c.Pods(api.NamespaceDefault).List(label)
+	pods, err := c.Pods(api.NamespaceDefault).List(label, fields.Everything())
 	Expect(err).NotTo(HaveOccurred())
 	for _, pod := range pods.Items {
 		err = waitForPodRunning(c, pod.Name)
@@ -163,7 +163,7 @@ func ClusterLevelLoggingWithElasticsearch(c *client.Client) {
 	}
 
 	// Obtain a list of nodes so we can place one synthetic logger on each node.
-	nodes, err := c.Nodes().List()
+	nodes, err := c.Nodes().List(labels.Everything(), fields.Everything())
 	if err != nil {
 		Failf("Failed to list nodes: %v", err)
 	}
@@ -198,7 +198,7 @@ func ClusterLevelLoggingWithElasticsearch(c *client.Client) {
 				Containers: []api.Container{
 					{
 						Name:    "synth-logger",
-						Image:   "ubuntu:14.04",
+						Image:   "gcr.io/google_containers/ubuntu:14.04",
 						Command: []string{"bash", "-c", fmt.Sprintf("i=0; while ((i < %d)); do echo \"%d %s $i %s\"; i=$(($i+1)); done", countTo, i, taintName, podName)},
 					},
 				},

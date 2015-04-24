@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
 	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -55,11 +56,11 @@ $ kubectl delete pod 1234-56-7890-234234-456456
 $ kubectl delete pods --all`
 )
 
-func (f *Factory) NewCmdDelete(out io.Writer) *cobra.Command {
+func NewCmdDelete(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	var filenames util.StringList
 	cmd := &cobra.Command{
 		Use:     "delete ([-f FILENAME] | (RESOURCE [(ID | -l label | --all)]",
-		Short:   "Delete a resource by filename, stdin, or resource and ID.",
+		Short:   "Delete a resource by filename, stdin, resource and ID, or by resources and label selector.",
 		Long:    delete_long,
 		Example: delete_example,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -67,25 +68,26 @@ func (f *Factory) NewCmdDelete(out io.Writer) *cobra.Command {
 			cmdutil.CheckErr(err)
 		},
 	}
-	cmd.Flags().VarP(&filenames, "filename", "f", "Filename, directory, or URL to a file containing the resource to delete")
+	usage := "Filename, directory, or URL to a file containing the resource to delete"
+	kubectl.AddJsonFilenameFlag(cmd, &filenames, usage)
 	cmd.Flags().StringP("selector", "l", "", "Selector (label query) to filter on")
 	cmd.Flags().Bool("all", false, "[-all] to select all the specified resources")
 	return cmd
 }
 
-func RunDelete(f *Factory, out io.Writer, cmd *cobra.Command, args []string, filenames util.StringList) error {
+func RunDelete(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string, filenames util.StringList) error {
 	cmdNamespace, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand(cmd)).
+	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(filenames...).
 		SelectorParam(cmdutil.GetFlagString(cmd, "selector")).
 		SelectAllParam(cmdutil.GetFlagBool(cmd, "all")).
-		ResourceTypeOrNameArgs(false, args...).
+		ResourceTypeOrNameArgs(false, args...).RequireObject(false).
 		Flatten().
 		Do()
 	err = r.Err()
@@ -99,7 +101,7 @@ func RunDelete(f *Factory, out io.Writer, cmd *cobra.Command, args []string, fil
 		if err := resource.NewHelper(r.Client, r.Mapping).Delete(r.Namespace, r.Name); err != nil {
 			return err
 		}
-		fmt.Fprintf(out, "%s\n", r.Name)
+		fmt.Fprintf(out, "%s/%s\n", r.Mapping.Resource, r.Name)
 		return nil
 	})
 	if err != nil {

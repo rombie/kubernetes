@@ -17,6 +17,7 @@ limitations under the License.
 package rest
 
 import (
+	"io"
 	"net/http"
 	"net/url"
 
@@ -27,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 )
 
-// RESTStorage is a generic interface for RESTful storage services.
+// Storage is a generic interface for RESTful storage services.
 // Resources which are exported to the RESTful API of apiserver need to implement this interface. It is expected
 // that objects may implement any of the below interfaces.
 type Storage interface {
@@ -51,6 +52,26 @@ type Getter interface {
 	// Although it can return an arbitrary error value, IsNotFound(err) is true for the
 	// returned error value err when the specified resource is not found.
 	Get(ctx api.Context, name string) (runtime.Object, error)
+}
+
+// GetterWithOptions is an object that retrieve a named RESTful resource and takes
+// additional options on the get request. It allows a caller to also receive the
+// subpath of the GET request.
+type GetterWithOptions interface {
+	// Get finds a resource in the storage by name and returns it.
+	// Although it can return an arbitrary error value, IsNotFound(err) is true for the
+	// returned error value err when the specified resource is not found.
+	// The options object passed to it is of the same type returned by the NewGetOptions
+	// method.
+	Get(ctx api.Context, name string, options runtime.Object) (runtime.Object, error)
+
+	// NewGetOptions returns an empty options object that will be used to pass
+	// options to the Get method. It may return a bool and a string, if true, the
+	// value of the request path below the object will be included as the named
+	// string in the serialization of the runtime object. E.g., returning "path"
+	// will convert the trailing request scheme value to "path" in the map[string][]string
+	// passed to the convertor.
+	NewGetOptions() (runtime.Object, bool, string)
 }
 
 // Deleter is an object that can delete a named RESTful resource.
@@ -118,6 +139,7 @@ type CreaterUpdater interface {
 // CreaterUpdater must satisfy the Updater interface.
 var _ Updater = CreaterUpdater(nil)
 
+// Patcher is a storage object that supports both get and update.
 type Patcher interface {
 	Getter
 	Updater
@@ -147,4 +169,49 @@ type StandardStorage interface {
 type Redirector interface {
 	// ResourceLocation should return the remote location of the given resource, and an optional transport to use to request it, or an error.
 	ResourceLocation(ctx api.Context, id string) (remoteLocation *url.URL, transport http.RoundTripper, err error)
+}
+
+// ConnectHandler is a handler for HTTP connection requests. It extends the standard
+// http.Handler interface by adding a method that returns an error object if an error
+// occurred during the handling of the request.
+type ConnectHandler interface {
+	http.Handler
+
+	// RequestError returns an error if one occurred during handling of an HTTP request
+	RequestError() error
+}
+
+// Connecter is a storage object that responds to a connection request
+type Connecter interface {
+	// Connect returns a ConnectHandler that will handle the request/response for a request
+	Connect(ctx api.Context, id string, options runtime.Object) (ConnectHandler, error)
+
+	// NewConnectOptions returns an empty options object that will be used to pass
+	// options to the Connect method. If nil, then a nil options object is passed to
+	// Connect. It may return a bool and a string. If true, the value of the request
+	// path below the object will be included as the named string in the serialization
+	// of the runtime object.
+	NewConnectOptions() (runtime.Object, bool, string)
+
+	// ConnectMethods returns the list of HTTP methods handled by Connect
+	ConnectMethods() []string
+}
+
+// ResourceStreamer is an interface implemented by objects that prefer to be streamed from the server
+// instead of decoded directly.
+type ResourceStreamer interface {
+	// InputStream should return an io.ReadCloser if the provided object supports streaming. The desired
+	// api version and a accept header (may be empty) are passed to the call. If no error occurs,
+	// the caller may return a flag indicating whether the result should be flushed as writes occur
+	// and a content type string that indicates the type of the stream.
+	// If a null stream is returned, a StatusNoContent response wil be generated.
+	InputStream(apiVersion, acceptHeader string) (stream io.ReadCloser, flush bool, mimeType string, err error)
+}
+
+// StorageMetadata is an optional interface that callers can implement to provide additional
+// information about their Storage objects.
+type StorageMetadata interface {
+	// ProducesMIMETypes returns a list of the MIME types the specified HTTP verb (GET, POST, DELETE,
+	// PATCH) can respond with.
+	ProducesMIMETypes(verb string) []string
 }

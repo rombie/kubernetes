@@ -25,6 +25,10 @@ import (
 
 func init() {
 	factory.RegisterAlgorithmProvider(factory.DefaultProvider, defaultPredicates(), defaultPriorities())
+	// EqualPriority is a prioritizer function that gives an equal weight of one to all minions
+	// Register the priority function so that its available
+	// but do not include it as part of the default priorities
+	factory.RegisterPriorityFunction("EqualPriority", algorithm.EqualPriority, 1)
 }
 
 func defaultPredicates() util.StringSet {
@@ -56,17 +60,17 @@ func defaultPriorities() util.StringSet {
 	return util.NewStringSet(
 		// Prioritize nodes by least requested utilization.
 		factory.RegisterPriorityFunction("LeastRequestedPriority", algorithm.LeastRequestedPriority, 1),
+		// Prioritizes nodes to help achieve balanced resource usage
+		factory.RegisterPriorityFunction("BalancedResourceAllocation", algorithm.BalancedResourceAllocation, 1),
 		// spreads pods by minimizing the number of pods (belonging to the same service) on the same minion.
 		factory.RegisterPriorityConfigFactory(
 			"ServiceSpreadingPriority",
-			func(args factory.PluginFactoryArgs) algorithm.PriorityConfig {
-				return algorithm.PriorityConfig{
-					Function: algorithm.NewServiceSpreadPriority(args.ServiceLister),
-					Weight:   1,
-				}
+			factory.PriorityConfigFactory{
+				Function: func(args factory.PluginFactoryArgs) algorithm.PriorityFunction {
+					return algorithm.NewServiceSpreadPriority(args.ServiceLister)
+				},
+				Weight: 1,
 			},
 		),
-		// EqualPriority is a prioritizer function that gives an equal weight of one to all minions
-		factory.RegisterPriorityFunction("EqualPriority", algorithm.EqualPriority, 0),
 	)
 }

@@ -24,12 +24,14 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	influxdb "github.com/influxdb/influxdb/client"
 
 	. "github.com/onsi/ginkgo"
 )
 
+// TODO: quinton: debug issue #6541 and then remove Pending flag here.
 var _ = Describe("Monitoring", func() {
 	var c *client.Client
 
@@ -40,9 +42,9 @@ var _ = Describe("Monitoring", func() {
 	})
 
 	It("verify monitoring pods and all cluster nodes are available on influxdb using heapster.", func() {
-		if testContext.provider != "gce" {
+		if !providerIs("gce") {
 			By(fmt.Sprintf("Skipping Monitoring test, which is only supported for provider gce (not %s)",
-				testContext.provider))
+				testContext.Provider))
 			return
 		}
 		testMonitoringUsingHeapsterInfluxdb(c)
@@ -84,7 +86,7 @@ func verifyExpectedRcsExistAndGetExpectedPods(c *client.Client) ([]string, error
 				return nil, fmt.Errorf("expected to find only one replica for rc %q, found %d", rc.Name, rc.Status.Replicas)
 			}
 			expectedRcs[rc.Name] = true
-			podList, err := c.Pods(api.NamespaceDefault).List(labels.Set(rc.Spec.Selector).AsSelector())
+			podList, err := c.Pods(api.NamespaceDefault).List(labels.Set(rc.Spec.Selector).AsSelector(), fields.Everything())
 			if err != nil {
 				return nil, err
 			}
@@ -120,7 +122,7 @@ func expectedServicesExist(c *client.Client) error {
 }
 
 func getAllNodesInCluster(c *client.Client) ([]string, error) {
-	nodeList, err := c.Nodes().List()
+	nodeList, err := c.Nodes().List(labels.Everything(), fields.Everything())
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +139,7 @@ func getInfluxdbData(c *influxdb.Client, query string) (map[string]bool, error) 
 		return nil, err
 	}
 	if len(series) != 1 {
-		Failf("expected only one series from Influxdb for query %q. Got %+v", query, series)
+		return nil, fmt.Errorf("expected only one series from Influxdb for query %q. Got %+v", query, series)
 	}
 	if len(series[0].GetColumns()) != 2 {
 		Failf("Expected two columns for query %q. Found %v", query, series[0].GetColumns())
@@ -192,7 +194,7 @@ func validatePodsAndNodes(influxdbClient *influxdb.Client, expectedPods, expecte
 }
 
 func getMasterHost() string {
-	masterUrl, err := url.Parse(testContext.host)
+	masterUrl, err := url.Parse(testContext.Host)
 	expectNoError(err)
 	return masterUrl.Host
 }
@@ -207,7 +209,7 @@ func testMonitoringUsingHeapsterInfluxdb(c *client.Client) {
 	if !ok {
 		Failf("failed to get master http client")
 	}
-	proxyUrl := fmt.Sprintf("%s/api/v1beta1/proxy/services/%s/", getMasterHost(), influxdbService)
+	proxyUrl := fmt.Sprintf("%s/api/v1beta3/proxy/namespaces/default/services/%s/", getMasterHost(), influxdbService)
 	config := &influxdb.ClientConfig{
 		Host: proxyUrl,
 		// TODO(vishh): Infer username and pw from the Pod spec.

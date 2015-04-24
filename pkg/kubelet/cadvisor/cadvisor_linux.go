@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
+	"github.com/google/cadvisor/events"
 	cadvisorFs "github.com/google/cadvisor/fs"
 	cadvisorHttp "github.com/google/cadvisor/http"
 	cadvisorApi "github.com/google/cadvisor/info/v1"
@@ -76,9 +77,9 @@ func New(port uint) (Interface, error) {
 	return cadvisorClient, nil
 }
 
-func (self *cadvisorClient) exportHTTP(port uint) error {
+func (cc *cadvisorClient) exportHTTP(port uint) error {
 	mux := http.NewServeMux()
-	err := cadvisorHttp.RegisterHandlers(mux, self, "", "", "", "", "/metrics")
+	err := cadvisorHttp.RegisterHandlers(mux, cc, "", "", "", "", "/metrics")
 	if err != nil {
 		return err
 	}
@@ -105,16 +106,33 @@ func (self *cadvisorClient) exportHTTP(port uint) error {
 	return nil
 }
 
-func (self *cadvisorClient) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error) {
-	return self.GetContainerInfo(name, req)
+func (cc *cadvisorClient) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error) {
+	return cc.GetContainerInfo(name, req)
 }
 
-func (self *cadvisorClient) MachineInfo() (*cadvisorApi.MachineInfo, error) {
-	return self.GetMachineInfo()
+func (cc *cadvisorClient) VersionInfo() (*cadvisorApi.VersionInfo, error) {
+	return cc.GetVersionInfo()
 }
 
-func (self *cadvisorClient) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
-	res, err := self.GetFsInfo(cadvisorFs.LabelDockerImages)
+func (cc *cadvisorClient) SubcontainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (map[string]*cadvisorApi.ContainerInfo, error) {
+	infos, err := cc.SubcontainersInfo(name, req)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*cadvisorApi.ContainerInfo, len(infos))
+	for _, info := range infos {
+		result[info.Name] = info
+	}
+	return result, nil
+}
+
+func (cc *cadvisorClient) MachineInfo() (*cadvisorApi.MachineInfo, error) {
+	return cc.GetMachineInfo()
+}
+
+func (cc *cadvisorClient) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
+	res, err := cc.GetFsInfo(cadvisorFs.LabelDockerImages)
 	if err != nil {
 		return cadvisorApiV2.FsInfo{}, err
 	}
@@ -127,4 +145,8 @@ func (self *cadvisorClient) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
 	}
 
 	return res[0], nil
+}
+
+func (cc *cadvisorClient) GetPastEvents(request *events.Request) ([]*cadvisorApi.Event, error) {
+	return cc.GetPastEvents(request)
 }

@@ -45,12 +45,18 @@ func (ServiceGenerator) Generate(params map[string]string) (runtime.Object, erro
 	if !found || len(selectorString) == 0 {
 		return nil, fmt.Errorf("'selector' is a required parameter.")
 	}
-	selector := ParseLabels(selectorString)
+	selector, err := ParseLabels(selectorString)
+	if err != nil {
+		return nil, err
+	}
 
 	labelsString, found := params["labels"]
 	var labels map[string]string
 	if found && len(labelsString) > 0 {
-		labels = ParseLabels(labelsString)
+		labels, err = ParseLabels(labelsString)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	name, found := params["name"]
@@ -71,9 +77,14 @@ func (ServiceGenerator) Generate(params map[string]string) (runtime.Object, erro
 			Labels: labels,
 		},
 		Spec: api.ServiceSpec{
-			Port:     port,
-			Protocol: api.Protocol(params["protocol"]),
 			Selector: selector,
+			Ports: []api.ServicePort{
+				{
+					Name:     "default",
+					Port:     port,
+					Protocol: api.Protocol(params["protocol"]),
+				},
+			},
 		},
 	}
 	targetPort, found := params["target-port"]
@@ -82,12 +93,12 @@ func (ServiceGenerator) Generate(params map[string]string) (runtime.Object, erro
 	}
 	if found && len(targetPort) > 0 {
 		if portNum, err := strconv.Atoi(targetPort); err != nil {
-			service.Spec.TargetPort = util.NewIntOrStringFromString(targetPort)
+			service.Spec.Ports[0].TargetPort = util.NewIntOrStringFromString(targetPort)
 		} else {
-			service.Spec.TargetPort = util.NewIntOrStringFromInt(portNum)
+			service.Spec.Ports[0].TargetPort = util.NewIntOrStringFromInt(portNum)
 		}
 	} else {
-		service.Spec.TargetPort = util.NewIntOrStringFromInt(port)
+		service.Spec.Ports[0].TargetPort = util.NewIntOrStringFromInt(port)
 	}
 	if params["create-external-load-balancer"] == "true" {
 		service.Spec.CreateExternalLoadBalancer = true

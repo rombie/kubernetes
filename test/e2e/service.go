@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
@@ -34,15 +35,19 @@ import (
 
 var _ = Describe("Services", func() {
 	var c *client.Client
+	// Use these in tests.  They're unique for each test to prevent name collisions.
+	var namespace0, namespace1 string
 
 	BeforeEach(func() {
 		var err error
 		c, err = loadClient()
 		Expect(err).NotTo(HaveOccurred())
+		namespace0 = "e2e-ns-" + dateStamp() + "-0"
+		namespace1 = "e2e-ns-" + dateStamp() + "-1"
 	})
 
 	It("should provide DNS for the cluster", func() {
-		if testContext.provider == "vagrant" {
+		if providerIs("vagrant") {
 			By("Skipping test which is broken for vagrant (See https://github.com/GoogleCloudPlatform/kubernetes/issues/3580)")
 			return
 		}
@@ -70,7 +75,7 @@ var _ = Describe("Services", func() {
 		pod := &api.Pod{
 			TypeMeta: api.TypeMeta{
 				Kind:       "Pod",
-				APIVersion: "v1beta1",
+				APIVersion: latest.Version,
 			},
 			ObjectMeta: api.ObjectMeta{
 				Name: "dns-test-" + string(util.NewUUID()),
@@ -87,7 +92,7 @@ var _ = Describe("Services", func() {
 				Containers: []api.Container{
 					{
 						Name:  "webserver",
-						Image: "kubernetes/test-webserver",
+						Image: "gcr.io/google_containers/test-webserver",
 						VolumeMounts: []api.VolumeMount{
 							{
 								Name:      "results",
@@ -97,7 +102,7 @@ var _ = Describe("Services", func() {
 					},
 					{
 						Name:    "pinger",
-						Image:   "busybox",
+						Image:   "gcr.io/google_containers/busybox",
 						Command: []string{"sh", "-c", probeCmd},
 						VolumeMounts: []api.VolumeMount{
 							{
@@ -110,7 +115,7 @@ var _ = Describe("Services", func() {
 			},
 		}
 
-		By("submitting the pod to kuberenetes")
+		By("submitting the pod to kubernetes")
 		defer func() {
 			By("deleting the pod")
 			defer GinkgoRecover()
@@ -137,7 +142,7 @@ var _ = Describe("Services", func() {
 				_, err := c.Get().
 					Prefix("proxy").
 					Resource("pods").
-					Namespace("default").
+					Namespace(api.NamespaceDefault).
 					Name(pod.Name).
 					Suffix("results", name).
 					Do().Raw()
@@ -162,8 +167,7 @@ var _ = Describe("Services", func() {
 	It("should provide RW and RO services", func() {
 		svc := api.ServiceList{}
 		err := c.Get().
-			Namespace("default").
-			AbsPath("/api/v1beta1/proxy/services/kubernetes-ro/api/v1beta1/services").
+			AbsPath("/api/v1beta3/proxy/namespaces/default/services/kubernetes-ro/api/v1beta3/services").
 			Do().
 			Into(&svc)
 		if err != nil {
@@ -200,9 +204,11 @@ var _ = Describe("Services", func() {
 				Name: serviceName,
 			},
 			Spec: api.ServiceSpec{
-				Port:       80,
-				Selector:   labels,
-				TargetPort: util.NewIntOrStringFromInt(80),
+				Selector: labels,
+				Ports: []api.ServicePort{{
+					Port:       80,
+					TargetPort: util.NewIntOrStringFromInt(80),
+				}},
 			},
 		}
 		_, err := c.Services(ns).Create(service)
@@ -250,8 +256,13 @@ var _ = Describe("Services", func() {
 	}, 240.0)
 
 	It("should be able to create a functioning external load balancer", func() {
+		if !providerIs("gce", "gke") {
+			By(fmt.Sprintf("Skipping service external load balancer test; uses createExternalLoadBalancer, a (gce|gke) feature"))
+			return
+		}
+
 		serviceName := "external-lb-test"
-		ns := api.NamespaceDefault
+		ns := namespace0
 		labels := map[string]string{
 			"key0": "value0",
 		}
@@ -260,15 +271,14 @@ var _ = Describe("Services", func() {
 				Name: serviceName,
 			},
 			Spec: api.ServiceSpec{
-				Port:                       80,
-				Selector:                   labels,
-				TargetPort:                 util.NewIntOrStringFromInt(80),
+				Selector: labels,
+				Ports: []api.ServicePort{{
+					Port:       80,
+					TargetPort: util.NewIntOrStringFromInt(80),
+				}},
 				CreateExternalLoadBalancer: true,
 			},
 		}
-
-		By("cleaning up previous service " + serviceName + " from namespace " + ns)
-		c.Services(ns).Delete(serviceName)
 
 		By("creating service " + serviceName + " with external load balancer in namespace " + ns)
 		result, err := c.Services(ns).Create(service)
@@ -279,16 +289,20 @@ var _ = Describe("Services", func() {
 			Expect(err).NotTo(HaveOccurred())
 		}(ns, serviceName)
 
+		// Wait for the load balancer to be created asynchronously, which is
+		// currently indicated by a public IP address being added to the spec.
+		result, err = waitForPublicIPs(c, serviceName, ns)
+		Expect(err).NotTo(HaveOccurred())
 		if len(result.Spec.PublicIPs) != 1 {
 			Failf("got unexpected number (%d) of public IPs for externally load balanced service: %v", result.Spec.PublicIPs, result)
 		}
 		ip := result.Spec.PublicIPs[0]
-		port := result.Spec.Port
+		port := result.Spec.Ports[0].Port
 
 		pod := &api.Pod{
 			TypeMeta: api.TypeMeta{
 				Kind:       "Pod",
-				APIVersion: "v1beta1",
+				APIVersion: latest.Version,
 			},
 			ObjectMeta: api.ObjectMeta{
 				Name:   "elb-test-" + string(util.NewUUID()),
@@ -298,14 +312,14 @@ var _ = Describe("Services", func() {
 				Containers: []api.Container{
 					{
 						Name:  "webserver",
-						Image: "kubernetes/test-webserver",
+						Image: "gcr.io/google_containers/test-webserver",
 					},
 				},
 			},
 		}
 
 		By("creating pod to be part of service " + serviceName)
-		podClient := c.Pods(api.NamespaceDefault)
+		podClient := c.Pods(ns)
 		defer func() {
 			By("deleting pod " + pod.Name)
 			defer GinkgoRecover()
@@ -314,11 +328,11 @@ var _ = Describe("Services", func() {
 		if _, err := podClient.Create(pod); err != nil {
 			Failf("Failed to create pod %s: %v", pod.Name, err)
 		}
-		expectNoError(waitForPodRunning(c, pod.Name))
+		expectNoError(waitForPodRunningInNamespace(c, pod.Name, ns))
 
 		By("hitting the pod through the service's external load balancer")
 		var resp *http.Response
-		for t := time.Now(); time.Since(t) < 4*time.Minute; time.Sleep(5 * time.Second) {
+		for t := time.Now(); time.Since(t) < podStartTimeout; time.Sleep(5 * time.Second) {
 			resp, err = http.Get(fmt.Sprintf("http://%s:%d", ip, port))
 			if err == nil {
 				break
@@ -338,8 +352,13 @@ var _ = Describe("Services", func() {
 	})
 
 	It("should correctly serve identically named services in different namespaces on different external IP addresses", func() {
-		serviceNames := []string{"services-namespace-test0"} // Could add more here, but then it takes longer.
-		namespaces := []string{"namespace0", "namespace1"}   // As above.
+		if !providerIs("gce", "gke") {
+			By(fmt.Sprintf("Skipping service namespace collision test; uses createExternalLoadBalancer, a (gce|gke) feature"))
+			return
+		}
+
+		serviceNames := []string{"s0"}                 // Could add more here, but then it takes longer.
+		namespaces := []string{namespace0, namespace1} // As above.
 		labels := map[string]string{
 			"key0": "value0",
 			"key1": "value1",
@@ -347,19 +366,13 @@ var _ = Describe("Services", func() {
 		service := &api.Service{
 			ObjectMeta: api.ObjectMeta{},
 			Spec: api.ServiceSpec{
-				Port:                       80,
-				Selector:                   labels,
-				TargetPort:                 util.NewIntOrStringFromInt(80),
+				Selector: labels,
+				Ports: []api.ServicePort{{
+					Port:       80,
+					TargetPort: util.NewIntOrStringFromInt(80),
+				}},
 				CreateExternalLoadBalancer: true,
 			},
-		}
-
-		// Always delete any turds from a previous run.
-		for _, namespace := range namespaces {
-			for _, serviceName := range serviceNames {
-				By("cleanup previous service " + serviceName + " in namespace " + namespace)
-				c.Services(namespace).Delete(serviceName)
-			}
 		}
 
 		publicIPs := []string{}
@@ -368,19 +381,43 @@ var _ = Describe("Services", func() {
 				service.ObjectMeta.Name = serviceName
 				service.ObjectMeta.Namespace = namespace
 				By("creating service " + serviceName + " in namespace " + namespace)
-				result, err := c.Services(namespace).Create(service)
+				_, err := c.Services(namespace).Create(service)
 				Expect(err).NotTo(HaveOccurred())
 				defer func(namespace, serviceName string) { // clean up when we're done
 					By("deleting service " + serviceName + " in namespace " + namespace)
 					err := c.Services(namespace).Delete(serviceName)
 					Expect(err).NotTo(HaveOccurred())
 				}(namespace, serviceName)
+			}
+		}
+		for _, namespace := range namespaces {
+			for _, serviceName := range serviceNames {
+				result, err := waitForPublicIPs(c, serviceName, namespace)
+				Expect(err).NotTo(HaveOccurred())
 				publicIPs = append(publicIPs, result.Spec.PublicIPs...) // Save 'em to check uniqueness
 			}
 		}
 		validateUniqueOrFail(publicIPs)
 	})
 })
+
+func waitForPublicIPs(c *client.Client, serviceName, namespace string) (*api.Service, error) {
+	const timeout = 4 * time.Minute
+	var service *api.Service
+	By(fmt.Sprintf("waiting up to %v for service %s in namespace %s to have a public IP", timeout, serviceName, namespace))
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(5 * time.Second) {
+		service, err := c.Services(namespace).Get(serviceName)
+		if err != nil {
+			Logf("Get service failed, ignoring for 5s: %v", err)
+			continue
+		}
+		if len(service.Spec.PublicIPs) > 0 {
+			return service, nil
+		}
+		Logf("Waiting for service %s in namespace %s to have a public IP (%v)", serviceName, namespace, time.Since(start))
+	}
+	return service, fmt.Errorf("service %s in namespace %s doesn't have a public IP after %.2f seconds", serviceName, namespace, timeout.Seconds())
+}
 
 func validateUniqueOrFail(s []string) {
 	By(fmt.Sprintf("validating unique: %v", s))
@@ -394,16 +431,22 @@ func validateUniqueOrFail(s []string) {
 	}
 }
 
-func validateIPsOrFail(c *client.Client, ns string, expectedPort int, expectedEndpoints []string, endpoints *api.Endpoints) {
+func flattenSubsets(subsets []api.EndpointSubset, expectedPort int) util.StringSet {
 	ips := util.StringSet{}
-	for _, ep := range endpoints.Endpoints {
-		if ep.Port != expectedPort {
-			Failf("invalid port, expected %d, got %d", expectedPort, ep.Port)
+	for _, ss := range subsets {
+		for _, port := range ss.Ports {
+			if port.Port == expectedPort {
+				for _, addr := range ss.Addresses {
+					ips.Insert(addr.IP)
+				}
+			}
 		}
-		ips.Insert(ep.IP)
 	}
+	return ips
+}
 
-	for _, name := range expectedEndpoints {
+func validateIPsOrFail(c *client.Client, ns string, expectedPods []string, ips util.StringSet) {
+	for _, name := range expectedPods {
 		pod, err := c.Pods(ns).Get(name)
 		if err != nil {
 			Failf("failed to get pod %s, that's pretty weird. validation failed: %s", name, err)
@@ -413,26 +456,26 @@ func validateIPsOrFail(c *client.Client, ns string, expectedPort int, expectedEn
 		}
 		By(fmt.Sprintf(""))
 	}
-	By(fmt.Sprintf("successfully validated IPs %v against expected endpoints %v port %d on namespace %s", ips, expectedEndpoints, expectedPort, ns))
-
+	By(fmt.Sprintf("successfully validated IPs %v against expected endpoints %v on namespace %s", ips, expectedPods, ns))
 }
 
-func validateEndpointsOrFail(c *client.Client, ns, serviceName string, expectedPort int, expectedEndpoints []string) {
+func validateEndpointsOrFail(c *client.Client, ns, serviceName string, expectedPort int, expectedPods []string) {
 	for {
 		endpoints, err := c.Endpoints(ns).Get(serviceName)
 		if err == nil {
-			if len(endpoints.Endpoints) == len(expectedEndpoints) {
-				validateIPsOrFail(c, ns, expectedPort, expectedEndpoints, endpoints)
-				return
+			ips := flattenSubsets(endpoints.Subsets, expectedPort)
+			if len(ips) == len(expectedPods) {
+				validateIPsOrFail(c, ns, expectedPods, ips)
+				break
 			} else {
-				By(fmt.Sprintf("Unexpected number of endpoints: found %v, expected %v (ignoring for 1 second)", endpoints.Endpoints, expectedEndpoints))
+				By(fmt.Sprintf("Unexpected number of endpoints: found %v, expected %v (ignoring for 1 second)", ips, expectedPods))
 			}
 		} else {
 			By(fmt.Sprintf("Failed to get endpoints: %v (ignoring for 1 second)", err))
 		}
 		time.Sleep(time.Second)
 	}
-	By(fmt.Sprintf("successfully validated endpoints %v port %d on service %s/%s", expectedEndpoints, expectedPort, ns, serviceName))
+	By(fmt.Sprintf("successfully validated endpoints %v port %d on service %s/%s", expectedPods, expectedPort, ns, serviceName))
 }
 
 func addEndpointPodOrFail(c *client.Client, ns, name string, labels map[string]string) {
@@ -446,7 +489,7 @@ func addEndpointPodOrFail(c *client.Client, ns, name string, labels map[string]s
 			Containers: []api.Container{
 				{
 					Name:  "test",
-					Image: "kubernetes/pause",
+					Image: "gcr.io/google_containers/pause",
 					Ports: []api.ContainerPort{{ContainerPort: 80}},
 				},
 			},
@@ -454,4 +497,11 @@ func addEndpointPodOrFail(c *client.Client, ns, name string, labels map[string]s
 	}
 	_, err := c.Pods(ns).Create(pod)
 	Expect(err).NotTo(HaveOccurred())
+}
+
+// dateStamp returns the current time as a string "YYYY-MM-DDTHHMMSS"
+// Handy for unique names across test runs
+func dateStamp() string {
+	now := time.Now()
+	return fmt.Sprintf("%04d-%02d-%02dt%02d%02d%02d", now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second())
 }

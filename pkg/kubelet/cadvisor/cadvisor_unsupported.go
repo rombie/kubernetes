@@ -21,6 +21,7 @@ package cadvisor
 import (
 	"errors"
 
+	"github.com/google/cadvisor/events"
 	cadvisorApi "github.com/google/cadvisor/info/v1"
 	cadvisorApiV2 "github.com/google/cadvisor/info/v2"
 )
@@ -36,18 +37,30 @@ func New(port uint) (Interface, error) {
 
 var unsupportedErr = errors.New("cAdvisor is unsupported in this build")
 
-func (self *cadvisorUnsupported) DockerContainer(name string, req *cadvisorApi.ContainerInfoRequest) (cadvisorApi.ContainerInfo, error) {
+func (cu *cadvisorUnsupported) DockerContainer(name string, req *cadvisorApi.ContainerInfoRequest) (cadvisorApi.ContainerInfo, error) {
 	return cadvisorApi.ContainerInfo{}, unsupportedErr
 }
 
-func (self *cadvisorUnsupported) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error) {
+func (cu *cadvisorUnsupported) ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error) {
 	return nil, unsupportedErr
 }
 
-func (self *cadvisorUnsupported) MachineInfo() (*cadvisorApi.MachineInfo, error) {
+func (cu *cadvisorUnsupported) SubcontainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (map[string]*cadvisorApi.ContainerInfo, error) {
 	return nil, unsupportedErr
 }
 
-func (self *cadvisorUnsupported) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
+func (cu *cadvisorUnsupported) MachineInfo() (*cadvisorApi.MachineInfo, error) {
+	return nil, unsupportedErr
+}
+
+func (cu *cadvisorUnsupported) VersionInfo() (*cadvisorApi.VersionInfo, error) {
+	return nil, unsupportedErr
+}
+
+func (cu *cadvisorUnsupported) DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error) {
 	return cadvisorApiV2.FsInfo{}, unsupportedErr
+}
+
+func (cu *cadvisorUnsupported) GetPastEvents(request *events.Request) ([]*cadvisorApi.Event, error) {
+	return []*cadvisorApi.Event{}, unsupportedErr
 }

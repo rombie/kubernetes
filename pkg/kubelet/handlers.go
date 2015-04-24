@@ -18,38 +18,53 @@ package kubelet
 
 import (
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
+	kubecontainer "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/container"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
 )
 
-type execActionHandler struct {
-	kubelet *Kubelet
+type handlerRunner struct {
+	httpGetter       httpGetter
+	commandRunner    dockertools.ContainerCommandRunner
+	containerManager *dockertools.DockerManager
 }
 
-func (e *execActionHandler) Run(podFullName string, uid types.UID, container *api.Container, handler *api.Handler) error {
-	_, err := e.kubelet.RunInContainer(podFullName, uid, container.Name, handler.Exec.Command)
-	return err
+// TODO(yifan): Merge commandRunner and containerManager once containerManager implements the ContainerCommandRunner interface.
+func newHandlerRunner(httpGetter httpGetter, commandRunner dockertools.ContainerCommandRunner, containerManager *dockertools.DockerManager) kubecontainer.HandlerRunner {
+	return &handlerRunner{
+		httpGetter:       httpGetter,
+		commandRunner:    commandRunner,
+		containerManager: containerManager,
+	}
 }
 
-type httpActionHandler struct {
-	kubelet *Kubelet
-	client  httpGetter
+// TODO(yifan): Use a strong type for containerID.
+func (hr *handlerRunner) Run(containerID string, pod *api.Pod, container *api.Container, handler *api.Handler) error {
+	switch {
+	case handler.Exec != nil:
+		_, err := hr.commandRunner.RunInContainer(containerID, handler.Exec.Command)
+		return err
+	case handler.HTTPGet != nil:
+		return hr.runHTTPHandler(pod, container, handler)
+	default:
+		err := fmt.Errorf("Invalid handler: %v", handler)
+		glog.Errorf("Cannot run handler: %v", err)
+		return err
+	}
 }
 
-// ResolvePort attempts to turn a IntOrString port reference into a concrete port number.
+// resolvePort attempts to turn a IntOrString port reference into a concrete port number.
 // If portReference has an int value, it is treated as a literal, and simply returns that value.
 // If portReference is a string, an attempt is first made to parse it as an integer.  If that fails,
 // an attempt is made to find a port with the same name in the container spec.
 // If a port with the same name is found, it's ContainerPort value is returned.  If no matching
 // port is found, an error is returned.
-func ResolvePort(portReference util.IntOrString, container *api.Container) (int, error) {
+func resolvePort(portReference util.IntOrString, container *api.Container) (int, error) {
 	if portReference.Kind == util.IntstrInt {
 		return portReference.IntVal, nil
 	} else {
@@ -68,10 +83,10 @@ func ResolvePort(portReference util.IntOrString, container *api.Container) (int,
 	return -1, fmt.Errorf("couldn't find port: %v in %v", portReference, container)
 }
 
-func (h *httpActionHandler) Run(podFullName string, uid types.UID, container *api.Container, handler *api.Handler) error {
+func (hr *handlerRunner) runHTTPHandler(pod *api.Pod, container *api.Container, handler *api.Handler) error {
 	host := handler.HTTPGet.Host
 	if len(host) == 0 {
-		status, err := h.kubelet.GetPodStatus(podFullName)
+		status, err := hr.containerManager.GetPodStatus(pod)
 		if err != nil {
 			glog.Errorf("Unable to get pod info, event handlers may be invalid.")
 			return err
@@ -86,30 +101,12 @@ func (h *httpActionHandler) Run(podFullName string, uid types.UID, container *ap
 		port = 80
 	} else {
 		var err error
-		port, err = ResolvePort(handler.HTTPGet.Port, container)
+		port, err = resolvePort(handler.HTTPGet.Port, container)
 		if err != nil {
 			return err
 		}
 	}
 	url := fmt.Sprintf("http://%s/%s", net.JoinHostPort(host, strconv.Itoa(port)), handler.HTTPGet.Path)
-	_, err := h.client.Get(url)
+	_, err := hr.httpGetter.Get(url)
 	return err
-}
-
-// FlushWriter provides wrapper for responseWriter with HTTP streaming capabilities
-type FlushWriter struct {
-	flusher http.Flusher
-	writer  io.Writer
-}
-
-// Write is a FlushWriter implementation of the io.Writer that sends any buffered data to the client.
-func (fw *FlushWriter) Write(p []byte) (n int, err error) {
-	n, err = fw.writer.Write(p)
-	if err != nil {
-		return
-	}
-	if fw.flusher != nil {
-		fw.flusher.Flush()
-	}
-	return
 }

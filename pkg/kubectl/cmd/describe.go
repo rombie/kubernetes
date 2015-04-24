@@ -20,35 +20,53 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/spf13/cobra"
+
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 )
 
-func (f *Factory) NewCmdDescribe(out io.Writer) *cobra.Command {
+func NewCmdDescribe(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "describe RESOURCE ID",
+		Use:   "describe (RESOURCE NAME | RESOURCE/NAME)",
 		Short: "Show details of a specific resource",
 		Long: `Show details of a specific resource.
 
 This command joins many API calls together to form a detailed description of a
 given resource.`,
+		Example: `// Describe a node
+$ kubectl describe nodes kubernetes-minion-emt8.c.myproject.internal
+
+// Describe a pod
+$ kubectl describe pods/nginx`,
 		Run: func(cmd *cobra.Command, args []string) {
 			err := RunDescribe(f, out, cmd, args)
-			util.CheckErr(err)
+			cmdutil.CheckErr(err)
 		},
+		ValidArgs: kubectl.DescribableResources(),
 	}
 	return cmd
 }
 
-func RunDescribe(f *Factory, out io.Writer, cmd *cobra.Command, args []string) error {
+func RunDescribe(f *cmdutil.Factory, out io.Writer, cmd *cobra.Command, args []string) error {
 	cmdNamespace, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 
-	mapper, _ := f.Object()
-	// TODO: use resource.Builder instead
-	mapping, namespace, name, err := util.ResourceFromArgs(cmd, args, mapper, cmdNamespace)
+	mapper, typer := f.Object()
+	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
+		ContinueOnError().
+		NamespaceParam(cmdNamespace).DefaultNamespace().
+		ResourceTypeOrNameArgs(false, args...).
+		Flatten().
+		Do()
+	err = r.Err()
+	if err != nil {
+		return err
+	}
+	mapping, err := r.ResourceMapping()
 	if err != nil {
 		return err
 	}
@@ -57,8 +75,13 @@ func RunDescribe(f *Factory, out io.Writer, cmd *cobra.Command, args []string) e
 	if err != nil {
 		return err
 	}
+	infos, err := r.Infos()
+	if err != nil {
+		return err
+	}
+	info := infos[0]
 
-	s, err := describer.Describe(namespace, name)
+	s, err := describer.Describe(info.Namespace, info.Name)
 	if err != nil {
 		return err
 	}

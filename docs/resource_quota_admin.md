@@ -18,12 +18,15 @@ Resource Quota is enforced in a particular namespace when there is a
 ##  Object Count Quota
 The number of objects of a given type can be restricted.  The following types
 are supported:
+
 | ResourceName | Description |
 | ------------ | ----------- |
 | pods | Total number of pods  |
 | services | Total number of services |
 | replicationcontrollers | Total number of replication controllers |
 | resourcequotas | Total number of resource quotas |
+| secrets | Total number of secrets |
+| persistentvolumeclaims | Total number of persistent volume claims |
 
 For example, `pods` quota counts and enforces a maximum on the number of `pods`
 created in a single namespace.
@@ -36,8 +39,7 @@ are supported:
 | ------------ | ----------- |
 | cpu | Total cpu limits of containers |
 | memory | Total memory usage limits of containers
-| `example.com/customresource` | Total of
-`resources.limits."example.com/customresource"` of containers |
+| `example.com/customresource` | Total of `resources.limits."example.com/customresource"` of containers |
 
 For example, `cpu` quota sums up the `resources.limits.cpu` fields of every
 container of every pod in the namespace, and enforces a maximum on that sum.

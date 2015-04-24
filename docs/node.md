@@ -38,30 +38,17 @@ must have appropriate conditions, see below.
 
 ### Node Condition
 Node Condition describes the conditions of `Running` nodes. Current valid
-conditions are `NodeReachable`, `NodeReady` and `NodeSchedulable`. In the
-future, we plan to add more. `NodeReachable` means the node can be reached
-within the cluster. `NodeReady` means the kubelet returns StatusOK for HTTP
-health check. `NodeSchedulable` means node is allowed to schedule any new
-pods and is controlled by 'unschedulable' field in node spec.
-Different condition provides different level of understanding for node
-health. Kubernetes will make a comprehensive scheduling decision based on the
-information. Node condition is represented as a json object. For example, the
-following conditions mean the node is reachable from its cluster, node is in
-sane state but not allowed to accept new pods:
+condition is `NodeReady`. In the future, we plan to add more. 
+`NodeReady` means kubelet is healthy and ready to accept pods. Different 
+condition provides different level of understanding for node health. 
+Node condition is represented as a json object. For example, 
+the following conditions mean the node is in sane state:
 ```json
 "conditions": [
   {
-    "kind": "Reachable",
-    "status": "Full",
-  },
-  {
     "kind": "Ready",
-    "status": "Full",
-  },
-  {
-    "kind": "Schedulable",
-    "status": "None",
-  },
+    "status": "True",
+    },
 ]
 ```
 

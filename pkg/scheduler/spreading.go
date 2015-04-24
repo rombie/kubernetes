@@ -34,9 +34,9 @@ func NewServiceSpreadPriority(serviceLister ServiceLister) PriorityFunction {
 
 // CalculateSpreadPriority spreads pods by minimizing the number of pods belonging to the same service
 // on the same machine.
-func (s *ServiceSpread) CalculateSpreadPriority(pod api.Pod, podLister PodLister, minionLister MinionLister) (HostPriorityList, error) {
+func (s *ServiceSpread) CalculateSpreadPriority(pod *api.Pod, podLister PodLister, minionLister MinionLister) (HostPriorityList, error) {
 	var maxCount int
-	var nsServicePods []api.Pod
+	var nsServicePods []*api.Pod
 
 	services, err := s.serviceLister.GetPodServices(pod)
 	if err == nil {
@@ -63,10 +63,10 @@ func (s *ServiceSpread) CalculateSpreadPriority(pod api.Pod, podLister PodLister
 	counts := map[string]int{}
 	if len(nsServicePods) > 0 {
 		for _, pod := range nsServicePods {
-			counts[pod.Status.Host]++
+			counts[pod.Spec.Host]++
 			// Compute the maximum number of pods hosted on any minion
-			if counts[pod.Status.Host] > maxCount {
-				maxCount = counts[pod.Status.Host]
+			if counts[pod.Spec.Host] > maxCount {
+				maxCount = counts[pod.Spec.Host]
 			}
 		}
 	}
@@ -101,8 +101,8 @@ func NewServiceAntiAffinityPriority(serviceLister ServiceLister, label string) P
 // CalculateAntiAffinityPriority spreads pods by minimizing the number of pods belonging to the same service
 // on machines with the same value for a particular label.
 // The label to be considered is provided to the struct (ServiceAntiAffinity).
-func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod api.Pod, podLister PodLister, minionLister MinionLister) (HostPriorityList, error) {
-	var nsServicePods []api.Pod
+func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod *api.Pod, podLister PodLister, minionLister MinionLister) (HostPriorityList, error) {
+	var nsServicePods []*api.Pod
 
 	services, err := s.serviceLister.GetPodServices(pod)
 	if err == nil {
@@ -140,7 +140,7 @@ func (s *ServiceAntiAffinity) CalculateAntiAffinityPriority(pod api.Pod, podList
 
 	podCounts := map[string]int{}
 	for _, pod := range nsServicePods {
-		label, exists := labeledMinions[pod.Status.Host]
+		label, exists := labeledMinions[pod.Spec.Host]
 		if !exists {
 			continue
 		}

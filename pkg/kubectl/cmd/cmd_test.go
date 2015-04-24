@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd_test
+package cmd
 
 import (
 	"bytes"
@@ -27,10 +27,11 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/meta"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/testapi"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
-	. "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd"
+	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
@@ -49,23 +50,33 @@ type externalType struct {
 	Name string `json:"name"`
 }
 
-func (*internalType) IsAnAPIObject() {}
-func (*externalType) IsAnAPIObject() {}
+type ExternalType2 struct {
+	Kind       string `json:"kind"`
+	APIVersion string `json:"apiVersion"`
+
+	Name string `json:"name"`
+}
+
+func (*internalType) IsAnAPIObject()  {}
+func (*externalType) IsAnAPIObject()  {}
+func (*ExternalType2) IsAnAPIObject() {}
 
 func newExternalScheme() (*runtime.Scheme, meta.RESTMapper, runtime.Codec) {
 	scheme := runtime.NewScheme()
 	scheme.AddKnownTypeWithName("", "Type", &internalType{})
 	scheme.AddKnownTypeWithName("unlikelyversion", "Type", &externalType{})
+	scheme.AddKnownTypeWithName("v1beta1", "Type", &ExternalType2{})
 
 	codec := runtime.CodecFor(scheme, "unlikelyversion")
-	mapper := meta.NewDefaultRESTMapper([]string{"unlikelyversion"}, func(version string) (*meta.VersionInterfaces, bool) {
+	validVersion := testapi.Version()
+	mapper := meta.NewDefaultRESTMapper([]string{"unlikelyversion", validVersion}, func(version string) (*meta.VersionInterfaces, bool) {
 		return &meta.VersionInterfaces{
-			Codec:            codec,
+			Codec:            runtime.CodecFor(scheme, version),
 			ObjectConvertor:  scheme,
 			MetadataAccessor: meta.NewAccessor(),
-		}, (version == "unlikelyversion")
+		}, (version == validVersion || version == "unlikelyversion")
 	})
-	for _, version := range []string{"unlikelyversion"} {
+	for _, version := range []string{"unlikelyversion", validVersion} {
 		for kind := range scheme.KnownTypes(version) {
 			mixedCase := false
 			scope := meta.RESTScopeNamespace
@@ -110,14 +121,14 @@ type testFactory struct {
 	Err          error
 }
 
-func NewTestFactory() (*Factory, *testFactory, runtime.Codec) {
+func NewTestFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 	scheme, mapper, codec := newExternalScheme()
 	t := &testFactory{
 		Validator: validation.NullSchema{},
 		Mapper:    mapper,
 		Typer:     scheme,
 	}
-	return &Factory{
+	return &cmdutil.Factory{
 		Object: func() (meta.RESTMapper, runtime.ObjectTyper) {
 			return t.Mapper, t.Typer
 		},
@@ -142,13 +153,34 @@ func NewTestFactory() (*Factory, *testFactory, runtime.Codec) {
 	}, t, codec
 }
 
-func NewAPIFactory() (*Factory, *testFactory, runtime.Codec) {
+func NewMixedFactory(apiClient resource.RESTClient) (*cmdutil.Factory, *testFactory, runtime.Codec) {
+	f, t, c := NewTestFactory()
+	f.Object = func() (meta.RESTMapper, runtime.ObjectTyper) {
+		return meta.MultiRESTMapper{t.Mapper, latest.RESTMapper}, runtime.MultiObjectTyper{t.Typer, api.Scheme}
+	}
+	f.RESTClient = func(m *meta.RESTMapping) (resource.RESTClient, error) {
+		if m.ObjectConvertor == api.Scheme {
+			return apiClient, t.Err
+		}
+		return t.Client, t.Err
+	}
+	return f, t, c
+}
+
+func NewAPIFactory() (*cmdutil.Factory, *testFactory, runtime.Codec) {
 	t := &testFactory{
 		Validator: validation.NullSchema{},
 	}
-	return &Factory{
+	return &cmdutil.Factory{
 		Object: func() (meta.RESTMapper, runtime.ObjectTyper) {
 			return latest.RESTMapper, api.Scheme
+		},
+		Client: func() (*client.Client, error) {
+			// Swap out the HTTP client out of the client with the fake's version.
+			fakeClient := t.Client.(*client.FakeRESTClient)
+			c := client.NewOrDie(t.ClientConfig)
+			c.Client = fakeClient.Client
+			return c, t.Err
 		},
 		RESTClient: func(*meta.RESTMapping) (resource.RESTClient, error) {
 			return t.Client, t.Err
@@ -168,7 +200,7 @@ func NewAPIFactory() (*Factory, *testFactory, runtime.Codec) {
 		ClientConfig: func() (*client.Config, error) {
 			return t.ClientConfig, t.Err
 		},
-	}, t, latest.Codec
+	}, t, testapi.Codec()
 }
 
 func objBody(codec runtime.Codec, obj runtime.Object) io.ReadCloser {
@@ -181,7 +213,7 @@ func stringBody(body string) io.ReadCloser {
 
 // Verify that resource.RESTClients constructed from a factory respect mapping.APIVersion
 func TestClientVersions(t *testing.T) {
-	f := NewFactory(nil)
+	f := cmdutil.NewFactory(nil)
 
 	versions := []string{
 		"v1beta1",
@@ -210,7 +242,7 @@ func ExamplePrintReplicationController() {
 		Codec:  codec,
 		Client: nil,
 	}
-	cmd := f.NewCmdRunContainer(os.Stdout)
+	cmd := NewCmdRunContainer(f, os.Stdout)
 	ctrl := &api.ReplicationController{
 		ObjectMeta: api.ObjectMeta{
 			Name:   "foo",
@@ -239,6 +271,6 @@ func ExamplePrintReplicationController() {
 		fmt.Printf("Unexpected error: %v", err)
 	}
 	// Output:
-	// CONTROLLER          CONTAINER(S)        IMAGE(S)            SELECTOR            REPLICAS
-	// foo                 foo                 someimage           foo=bar             1
+	// CONTROLLER   CONTAINER(S)   IMAGE(S)    SELECTOR   REPLICAS
+	// foo          foo            someimage   foo=bar    1
 }

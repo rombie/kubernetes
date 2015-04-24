@@ -22,13 +22,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
+	kubecontainer "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/container"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
 )
 
-type syncPodFnType func(*api.Pod, bool, dockertools.DockerContainers) error
+type syncPodFnType func(*api.Pod, *api.Pod, kubecontainer.Pod) error
 
 type podWorkers struct {
 	// Protects all per worker fields.
@@ -44,8 +44,8 @@ type podWorkers struct {
 	// Tracks the last undelivered work item for this pod - a work item is
 	// undelivered if it comes in while the worker is working.
 	lastUndeliveredWorkUpdate map[types.UID]workUpdate
-	// DockerCache is used for listing running containers.
-	dockerCache dockertools.DockerCache
+	// runtimeCache is used for listing running containers.
+	runtimeCache kubecontainer.RuntimeCache
 
 	// This function is run to sync the desired stated of pod.
 	// NOTE: This function has to be thread-safe - it can be called for
@@ -60,50 +60,50 @@ type workUpdate struct {
 	// The pod state to reflect.
 	pod *api.Pod
 
-	// Whether there exists a mirror pod for pod.
-	hasMirrorPod bool
+	// The mirror pod of pod; nil if it does not exist.
+	mirrorPod *api.Pod
 
 	// Function to call when the update is complete.
 	updateCompleteFn func()
 }
 
-func newPodWorkers(dockerCache dockertools.DockerCache, syncPodFn syncPodFnType,
+func newPodWorkers(runtimeCache kubecontainer.RuntimeCache, syncPodFn syncPodFnType,
 	recorder record.EventRecorder) *podWorkers {
 	return &podWorkers{
 		podUpdates:                map[types.UID]chan workUpdate{},
 		isWorking:                 map[types.UID]bool{},
 		lastUndeliveredWorkUpdate: map[types.UID]workUpdate{},
-		dockerCache:               dockerCache,
+		runtimeCache:              runtimeCache,
 		syncPodFn:                 syncPodFn,
 		recorder:                  recorder,
 	}
 }
 
 func (p *podWorkers) managePodLoop(podUpdates <-chan workUpdate) {
-	var minDockerCacheTime time.Time
+	var minRuntimeCacheTime time.Time
 	for newWork := range podUpdates {
 		func() {
 			defer p.checkForUpdates(newWork.pod.UID, newWork.updateCompleteFn)
 			// We would like to have the state of Docker from at least the moment
 			// when we finished the previous processing of that pod.
-			if err := p.dockerCache.ForceUpdateIfOlder(minDockerCacheTime); err != nil {
+			if err := p.runtimeCache.ForceUpdateIfOlder(minRuntimeCacheTime); err != nil {
 				glog.Errorf("Error updating docker cache: %v", err)
 				return
 			}
-			containers, err := p.dockerCache.RunningContainers()
+			pods, err := p.runtimeCache.GetPods()
 			if err != nil {
-				glog.Errorf("Error listing containers while syncing pod: %v", err)
+				glog.Errorf("Error getting pods while syncing pod: %v", err)
 				return
 			}
 
-			err = p.syncPodFn(newWork.pod, newWork.hasMirrorPod,
-				containers.FindContainersByPod(newWork.pod.UID, GetPodFullName(newWork.pod)))
+			err = p.syncPodFn(newWork.pod, newWork.mirrorPod,
+				kubecontainer.Pods(pods).FindPodByID(newWork.pod.UID))
 			if err != nil {
 				glog.Errorf("Error syncing pod %s, skipping: %v", newWork.pod.UID, err)
 				p.recorder.Eventf(newWork.pod, "failedSync", "Error syncing pod, skipping: %v", err)
 				return
 			}
-			minDockerCacheTime = time.Now()
+			minRuntimeCacheTime = time.Now()
 
 			newWork.updateCompleteFn()
 		}()
@@ -111,7 +111,7 @@ func (p *podWorkers) managePodLoop(podUpdates <-chan workUpdate) {
 }
 
 // Apply the new setting to the specified pod. updateComplete is called when the update is completed.
-func (p *podWorkers) UpdatePod(pod *api.Pod, hasMirrorPod bool, updateComplete func()) {
+func (p *podWorkers) UpdatePod(pod *api.Pod, mirrorPod *api.Pod, updateComplete func()) {
 	uid := pod.UID
 	var podUpdates chan workUpdate
 	var exists bool
@@ -134,13 +134,13 @@ func (p *podWorkers) UpdatePod(pod *api.Pod, hasMirrorPod bool, updateComplete f
 		p.isWorking[pod.UID] = true
 		podUpdates <- workUpdate{
 			pod:              pod,
-			hasMirrorPod:     hasMirrorPod,
+			mirrorPod:        mirrorPod,
 			updateCompleteFn: updateComplete,
 		}
 	} else {
 		p.lastUndeliveredWorkUpdate[pod.UID] = workUpdate{
 			pod:              pod,
-			hasMirrorPod:     hasMirrorPod,
+			mirrorPod:        mirrorPod,
 			updateCompleteFn: updateComplete,
 		}
 	}

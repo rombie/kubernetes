@@ -37,10 +37,13 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	apierrors "github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/latest"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/apiserver"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	nodeControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/controller"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider/nodecontroller"
 	replicationControllerPkg "github.com/GoogleCloudPlatform/kubernetes/pkg/controller"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/cadvisor"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
@@ -65,12 +68,14 @@ var (
 	fakeDocker1, fakeDocker2 dockertools.FakeDockerClient
 	// API version that should be used by the client to talk to the server.
 	apiVersion string
+	// Limit the number of concurrent tests.
+	maxConcurrency int
 )
 
 type fakeKubeletClient struct{}
 
-func (fakeKubeletClient) GetPodStatus(host, podNamespace, podID string) (api.PodStatusResult, error) {
-	glog.V(3).Infof("Trying to get container info for %v/%v/%v", host, podNamespace, podID)
+func (fakeKubeletClient) GetPodStatus(host, podNamespace, podName string) (api.PodStatusResult, error) {
+	glog.V(3).Infof("Trying to get container info for %v/%v/%v", host, podNamespace, podName)
 	// This is a horrible hack to get around the fact that we can't provide
 	// different port numbers per kubelet...
 	var c client.PodInfoGetter
@@ -86,24 +91,17 @@ func (fakeKubeletClient) GetPodStatus(host, podNamespace, podID string) (api.Pod
 			Port:   10251,
 		}
 	default:
-		glog.Fatalf("Can't get info for: '%v', '%v - %v'", host, podNamespace, podID)
+		glog.Fatalf("Can't get info for: '%v', '%v - %v'", host, podNamespace, podName)
 	}
-	r, err := c.GetPodStatus("127.0.0.1", podNamespace, podID)
+	r, err := c.GetPodStatus("127.0.0.1", podNamespace, podName)
 	if err != nil {
 		return r, err
 	}
 	r.Status.PodIP = "1.2.3.4"
-	m := make(api.PodInfo)
-	for k, v := range r.Status.Info {
-		v.Ready = true
-		m[k] = v
+	for i := range r.Status.ContainerStatuses {
+		r.Status.ContainerStatuses[i].Ready = true
 	}
-	r.Status.Info = m
 	return r, nil
-}
-
-func (fakeKubeletClient) GetNodeInfo(host string) (api.NodeInfo, error) {
-	return api.NodeInfo{}, nil
 }
 
 func (fakeKubeletClient) GetConnectionInfo(host string) (string, uint, http.RoundTripper, error) {
@@ -195,8 +193,6 @@ func startComponents(firstManifestURL, secondManifestURL, apiVersion string) (st
 		ReadOnlyPort:      portNumber,
 		PublicAddress:     publicAddress,
 		CacheTimeout:      2 * time.Second,
-		SyncPodStatus:     true,
-		EnableV1Beta3:     true,
 	})
 	handler.delegate = m.Handler
 
@@ -206,36 +202,43 @@ func startComponents(firstManifestURL, secondManifestURL, apiVersion string) (st
 	if err != nil {
 		glog.Fatalf("Couldn't create scheduler config: %v", err)
 	}
+	eventBroadcaster := record.NewBroadcaster()
+	schedulerConfig.Recorder = eventBroadcaster.NewRecorder(api.EventSource{Component: "scheduler"})
+	eventBroadcaster.StartRecordingToSink(cl.Events(""))
 	scheduler.New(schedulerConfig).Run()
 
 	endpoints := service.NewEndpointController(cl)
 	// ensure the service endpoints are sync'd several times within the window that the integration tests wait
-	go util.Forever(func() { endpoints.SyncServiceEndpoints() }, time.Second*4)
+	go endpoints.Run(3, util.NeverStop)
 
 	controllerManager := replicationControllerPkg.NewReplicationManager(cl)
 
 	// TODO: Write an integration test for the replication controllers watch.
 	controllerManager.Run(1 * time.Second)
 
-	nodeResources := &api.NodeResources{}
+	nodeResources := &api.NodeResources{
+		Capacity: api.ResourceList{
+			api.ResourceName(api.ResourceCPU):    resource.MustParse("10"),
+			api.ResourceName(api.ResourceMemory): resource.MustParse("10G"),
+		}}
 
-	nodeController := nodeControllerPkg.NewNodeController(nil, "", machineList, nodeResources, cl, fakeKubeletClient{}, 10, 5*time.Minute)
-	nodeController.Run(5*time.Second, true, false)
+	nodeController := nodecontroller.NewNodeController(nil, "", machineList, nodeResources, cl, 10, 5*time.Minute, util.NewFakeRateLimiter(), 40*time.Second, 60*time.Second, 5*time.Second, "")
+	nodeController.Run(5*time.Second, true)
 	cadvisorInterface := new(cadvisor.Fake)
 
 	// Kubelet (localhost)
 	testRootDir := makeTempDirOrDie("kubelet_integ_1.", "")
 	configFilePath := makeTempDirOrDie("config", testRootDir)
 	glog.Infof("Using %s as root dir for kubelet #1", testRootDir)
-	kcfg := kubeletapp.SimpleKubelet(cl, &fakeDocker1, machineList[0], testRootDir, firstManifestURL, "127.0.0.1", 10250, api.NamespaceDefault, empty_dir.ProbeVolumePlugins(), nil, cadvisorInterface, configFilePath)
-	kubeletapp.RunKubelet(kcfg)
+	kcfg := kubeletapp.SimpleKubelet(cl, &fakeDocker1, machineList[0], testRootDir, firstManifestURL, "127.0.0.1", 10250, api.NamespaceDefault, empty_dir.ProbeVolumePlugins(), nil, cadvisorInterface, configFilePath, nil, kubelet.FakeOS{})
+	kubeletapp.RunKubelet(kcfg, nil)
 	// Kubelet (machine)
 	// Create a second kubelet so that the guestbook example's two redis slaves both
 	// have a place they can schedule.
 	testRootDir = makeTempDirOrDie("kubelet_integ_2.", "")
 	glog.Infof("Using %s as root dir for kubelet #2", testRootDir)
-	kcfg = kubeletapp.SimpleKubelet(cl, &fakeDocker2, machineList[1], testRootDir, secondManifestURL, "127.0.0.1", 10251, api.NamespaceDefault, empty_dir.ProbeVolumePlugins(), nil, cadvisorInterface, "")
-	kubeletapp.RunKubelet(kcfg)
+	kcfg = kubeletapp.SimpleKubelet(cl, &fakeDocker2, machineList[1], testRootDir, secondManifestURL, "127.0.0.1", 10251, api.NamespaceDefault, empty_dir.ProbeVolumePlugins(), nil, cadvisorInterface, "", nil, kubelet.FakeOS{})
+	kubeletapp.RunKubelet(kcfg, nil)
 	return apiServer.URL, configFilePath
 }
 
@@ -254,11 +257,17 @@ func makeTempDirOrDie(prefix string, baseDir string) string {
 }
 
 // podsOnMinions returns true when all of the selected pods exist on a minion.
-func podsOnMinions(c *client.Client, pods api.PodList) wait.ConditionFunc {
+func podsOnMinions(c *client.Client, podNamespace string, labelSelector labels.Selector) wait.ConditionFunc {
 	podInfo := fakeKubeletClient{}
+	// wait for minions to indicate they have info about the desired pods
 	return func() (bool, error) {
+		pods, err := c.Pods(podNamespace).List(labelSelector, fields.Everything())
+		if err != nil {
+			glog.Infof("Unable to get pods to list: %v", err)
+			return false, nil
+		}
 		for i := range pods.Items {
-			host, id, namespace := pods.Items[i].Status.Host, pods.Items[i].Name, pods.Items[i].Namespace
+			host, id, namespace := pods.Items[i].Spec.Host, pods.Items[i].Name, pods.Items[i].Namespace
 			glog.Infof("Check whether pod %s.%s exists on node %q", id, namespace, host)
 			if len(host) == 0 {
 				glog.Infof("Pod %s.%s is not bound to a host yet", id, namespace)
@@ -277,41 +286,57 @@ func endpointsSet(c *client.Client, serviceNamespace, serviceID string, endpoint
 	return func() (bool, error) {
 		endpoints, err := c.Endpoints(serviceNamespace).Get(serviceID)
 		if err != nil {
-			glog.Infof("Error on creating endpoints: %v", err)
+			glog.Infof("Error getting endpoints: %v", err)
 			return false, nil
 		}
-		for _, e := range endpoints.Endpoints {
-			glog.Infof("%s/%s endpoint: %s:%d %#v", serviceNamespace, serviceID, e.IP, e.Port, e.TargetRef)
+		count := 0
+		for _, ss := range endpoints.Subsets {
+			for _, addr := range ss.Addresses {
+				for _, port := range ss.Ports {
+					count++
+					glog.Infof("%s/%s endpoint: %s:%d %#v", serviceNamespace, serviceID, addr.IP, port.Port, addr.TargetRef)
+				}
+			}
 		}
-		return len(endpoints.Endpoints) == endpointCount, nil
+		return count == endpointCount, nil
 	}
 }
 
-func podExists(c *client.Client, podNamespace string, podID string) wait.ConditionFunc {
+func countEndpoints(eps *api.Endpoints) int {
+	count := 0
+	for i := range eps.Subsets {
+		count += len(eps.Subsets[i].Addresses) * len(eps.Subsets[i].Ports)
+	}
+	return count
+}
+
+func podExists(c *client.Client, podNamespace string, podName string) wait.ConditionFunc {
 	return func() (bool, error) {
-		_, err := c.Pods(podNamespace).Get(podID)
+		_, err := c.Pods(podNamespace).Get(podName)
 		return err == nil, nil
 	}
 }
 
-func podNotFound(c *client.Client, podNamespace string, podID string) wait.ConditionFunc {
+func podNotFound(c *client.Client, podNamespace string, podName string) wait.ConditionFunc {
 	return func() (bool, error) {
-		_, err := c.Pods(podNamespace).Get(podID)
+		_, err := c.Pods(podNamespace).Get(podName)
 		return apierrors.IsNotFound(err), nil
 	}
 }
 
-func podRunning(c *client.Client, podNamespace string, podID string) wait.ConditionFunc {
+func podRunning(c *client.Client, podNamespace string, podName string) wait.ConditionFunc {
 	return func() (bool, error) {
-		pod, err := c.Pods(podNamespace).Get(podID)
+		pod, err := c.Pods(podNamespace).Get(podName)
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 		if err != nil {
-			return false, err
+			// This could be a connection error so we want to retry, but log the error.
+			glog.Errorf("Error when reading pod %q: %v", podName, err)
+			return false, nil
 		}
 		if pod.Status.Phase != api.PodRunning {
-			return false, errors.New(fmt.Sprintf("Pod status is %q", pod.Status.Phase))
+			return false, nil
 		}
 		return true, nil
 	}
@@ -360,7 +385,7 @@ containers:
 			namespace := kubelet.NamespaceDefault
 			if err := wait.Poll(time.Second, time.Minute*2,
 				podRunning(c, namespace, podName)); err != nil {
-				if pods, err := c.Pods(namespace).List(labels.Everything()); err == nil {
+				if pods, err := c.Pods(namespace).List(labels.Everything(), fields.Everything()); err == nil {
 					for _, pod := range pods.Items {
 						glog.Infof("pod found: %s/%s", namespace, pod.Name)
 					}
@@ -369,13 +394,13 @@ containers:
 			}
 			// Delete the mirror pod, and wait for it to be recreated.
 			c.Pods(namespace).Delete(podName)
-			if err = wait.Poll(time.Second, time.Second*30,
+			if err = wait.Poll(time.Second, time.Minute*1,
 				podRunning(c, namespace, podName)); err != nil {
 				glog.Fatalf("%s FAILED: mirror pod has not been re-created or is not running: %v", desc, err)
 			}
 			// Remove the manifest file, and wait for the mirror pod to be deleted.
 			os.Remove(manifestFile.Name())
-			if err = wait.Poll(time.Second, time.Second*30,
+			if err = wait.Poll(time.Second, time.Minute*1,
 				podNotFound(c, namespace, podName)); err != nil {
 				glog.Fatalf("%s FAILED: mirror pod has not been deleted: %v", desc, err)
 			}
@@ -406,12 +431,13 @@ func runReplicationControllerTest(c *client.Client) {
 		glog.Fatalf("FAILED: pods never created %v", err)
 	}
 
-	// wait for minions to indicate they have info about the desired pods
-	pods, err := c.Pods("test").List(labels.Set(updated.Spec.Selector).AsSelector())
-	if err != nil {
-		glog.Fatalf("FAILED: unable to get pods to list: %v", err)
-	}
-	if err := wait.Poll(time.Second, time.Second*30, podsOnMinions(c, *pods)); err != nil {
+	// Poll till we can retrieve the status of all pods matching the given label selector from their minions.
+	// This involves 3 operations:
+	//	- The scheduler must assign all pods to a minion
+	//	- The assignment must reflect in a `List` operation against the apiserver, for labels matching the selector
+	//  - We need to be able to query the kubelet on that minion for information about the pod
+	if err := wait.Poll(
+		time.Second, time.Second*30, podsOnMinions(c, "test", labels.Set(updated.Spec.Selector).AsSelector())); err != nil {
 		glog.Fatalf("FAILED: pods never started running %v", err)
 	}
 
@@ -444,12 +470,14 @@ func runSelfLinkTestOnNamespace(c *client.Client, namespace string) {
 			},
 		},
 		Spec: api.ServiceSpec{
-			Port: 12345,
 			// This is here because validation requires it.
 			Selector: map[string]string{
 				"foo": "bar",
 			},
-			Protocol:        "TCP",
+			Ports: []api.ServicePort{{
+				Port:     12345,
+				Protocol: "TCP",
+			}},
 			SessionAffinity: "None",
 		},
 	}
@@ -506,12 +534,14 @@ func runAtomicPutTest(c *client.Client) {
 			},
 		},
 		Spec: api.ServiceSpec{
-			Port: 12345,
 			// This is here because validation requires it.
 			Selector: map[string]string{
 				"foo": "bar",
 			},
-			Protocol:        "TCP",
+			Ports: []api.ServicePort{{
+				Port:     12345,
+				Protocol: "TCP",
+			}},
 			SessionAffinity: "None",
 		},
 	}
@@ -574,23 +604,24 @@ func runAtomicPutTest(c *client.Client) {
 
 func runPatchTest(c *client.Client) {
 	name := "patchservice"
+	resource := "services"
 	svcBody := api.Service{
 		TypeMeta: api.TypeMeta{
 			APIVersion: c.APIVersion(),
 		},
 		ObjectMeta: api.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				"name": name,
-			},
+			Name:   name,
+			Labels: map[string]string{},
 		},
 		Spec: api.ServiceSpec{
-			Port: 12345,
 			// This is here because validation requires it.
 			Selector: map[string]string{
 				"foo": "bar",
 			},
-			Protocol:        "TCP",
+			Ports: []api.ServicePort{{
+				Port:     12345,
+				Protocol: "TCP",
+			}},
 			SessionAffinity: "None",
 		},
 	}
@@ -599,44 +630,98 @@ func runPatchTest(c *client.Client) {
 	if err != nil {
 		glog.Fatalf("Failed creating patchservice: %v", err)
 	}
-	if len(svc.Labels) != 1 {
-		glog.Fatalf("Original length does not equal one")
+
+	patchBodies := map[string]map[api.PatchType]struct {
+		AddLabelBody        []byte
+		RemoveLabelBody     []byte
+		RemoveAllLabelsBody []byte
+	}{
+		"v1beta1": {
+			api.JSONPatchType: {
+				[]byte(`[{"op":"add","path":"/labels","value":{"foo":"bar","baz":"qux"}}]`),
+				[]byte(`[{"op":"remove","path":"/labels/foo"}]`),
+				[]byte(`[{"op":"remove","path":"/labels"}]`),
+			},
+			api.MergePatchType: {
+				[]byte(`{"labels":{"foo":"bar","baz":"qux"}}`),
+				[]byte(`{"labels":{"foo":null}}`),
+				[]byte(`{"labels":null}`),
+			},
+			api.StrategicMergePatchType: {
+				[]byte(`{"labels":{"foo":"bar","baz":"qux"}}`),
+				[]byte(`{"labels":{"foo":null}}`),
+				[]byte(`{"labels":{"$patch":"replace"}}`),
+			},
+		},
+		"v1beta3": {
+			api.JSONPatchType: {
+				[]byte(`[{"op":"add","path":"/metadata/labels","value":{"foo":"bar","baz":"qux"}}]`),
+				[]byte(`[{"op":"remove","path":"/metadata/labels/foo"}]`),
+				[]byte(`[{"op":"remove","path":"/metadata/labels"}]`),
+			},
+			api.MergePatchType: {
+				[]byte(`{"metadata":{"labels":{"foo":"bar","baz":"qux"}}}`),
+				[]byte(`{"metadata":{"labels":{"foo":null}}}`),
+				[]byte(`{"metadata":{"labels":null}}`),
+			},
+			api.StrategicMergePatchType: {
+				[]byte(`{"metadata":{"labels":{"foo":"bar","baz":"qux"}}}`),
+				[]byte(`{"metadata":{"labels":{"foo":null}}}`),
+				[]byte(`{"metadata":{"labels":{"$patch":"replace"}}}`),
+			},
+		},
 	}
 
-	// add label
-	svc.Labels["foo"] = "bar"
-	if _, err = services.Update(svc); err != nil {
-		glog.Fatalf("Failed updating patchservice: %v", err)
-	}
-	if svc, err = services.Get(name); err != nil {
-		glog.Fatalf("Failed getting patchservice: %v", err)
-	}
-	if len(svc.Labels) != 2 || svc.Labels["foo"] != "bar" {
-		glog.Fatalf("Failed updating patchservice, labels are: %v", svc.Labels)
-	}
+	pb := patchBodies[c.APIVersion()]
 
-	// remove one label
-	delete(svc.Labels, "name")
-	if _, err = services.Update(svc); err != nil {
-		glog.Fatalf("Failed updating patchservice: %v", err)
+	execPatch := func(pt api.PatchType, body []byte) error {
+		return c.Patch(pt).
+			Resource(resource).
+			Namespace(api.NamespaceDefault).
+			Name(name).
+			Body(body).
+			Do().
+			Error()
 	}
-	if svc, err = services.Get(name); err != nil {
-		glog.Fatalf("Failed getting patchservice: %v", err)
-	}
-	if len(svc.Labels) != 1 || svc.Labels["foo"] != "bar" {
-		glog.Fatalf("Failed updating patchservice, labels are: %v", svc.Labels)
-	}
+	for k, v := range pb {
+		// add label
+		err := execPatch(k, v.AddLabelBody)
+		if err != nil {
+			glog.Fatalf("Failed updating patchservice with patch type %s: %v", k, err)
+		}
+		svc, err = services.Get(name)
+		if err != nil {
+			glog.Fatalf("Failed getting patchservice: %v", err)
+		}
+		if len(svc.Labels) != 2 || svc.Labels["foo"] != "bar" || svc.Labels["baz"] != "qux" {
+			glog.Fatalf("Failed updating patchservice with patch type %s: labels are: %v", k, svc.Labels)
+		}
 
-	// remove all labels
-	svc.Labels = nil
-	if _, err = services.Update(svc); err != nil {
-		glog.Fatalf("Failed updating patchservice: %v", err)
-	}
-	if svc, err = services.Get(name); err != nil {
-		glog.Fatalf("Failed getting patchservice: %v", err)
-	}
-	if svc.Labels != nil {
-		glog.Fatalf("Failed remove all labels from patchservice: %v", svc.Labels)
+		// remove one label
+		err = execPatch(k, v.RemoveLabelBody)
+		if err != nil {
+			glog.Fatalf("Failed updating patchservice with patch type %s: %v", k, err)
+		}
+		svc, err = services.Get(name)
+		if err != nil {
+			glog.Fatalf("Failed getting patchservice: %v", err)
+		}
+		if len(svc.Labels) != 1 || svc.Labels["baz"] != "qux" {
+			glog.Fatalf("Failed updating patchservice with patch type %s: labels are: %v", k, svc.Labels)
+		}
+
+		// remove all labels
+		err = execPatch(k, v.RemoveAllLabelsBody)
+		if err != nil {
+			glog.Fatalf("Failed updating patchservice with patch type %s: %v", k, err)
+		}
+		svc, err = services.Get(name)
+		if err != nil {
+			glog.Fatalf("Failed getting patchservice: %v", err)
+		}
+		if svc.Labels != nil {
+			glog.Fatalf("Failed remove all labels from patchservice with patch type %s: %v", k, svc.Labels)
+		}
 	}
 
 	glog.Info("PATCHs work.")
@@ -664,7 +749,7 @@ func runMasterServiceTest(client *client.Client) {
 		if err != nil {
 			glog.Fatalf("unexpected error listing endpoints for kubernetes service: %v", err)
 		}
-		if len(ep.Endpoints) == 0 {
+		if countEndpoints(ep) == 0 {
 			glog.Fatalf("no endpoints for kubernetes service: %v", ep)
 		}
 	} else {
@@ -675,7 +760,7 @@ func runMasterServiceTest(client *client.Client) {
 		if err != nil {
 			glog.Fatalf("unexpected error listing endpoints for kubernetes service: %v", err)
 		}
-		if len(ep.Endpoints) == 0 {
+		if countEndpoints(ep) == 0 {
 			glog.Fatalf("no endpoints for kubernetes service: %v", ep)
 		}
 	} else {
@@ -726,8 +811,10 @@ func runServiceTest(client *client.Client) {
 			Selector: map[string]string{
 				"name": "thisisalonglabel",
 			},
-			Port:            8080,
-			Protocol:        "TCP",
+			Ports: []api.ServicePort{{
+				Port:     8080,
+				Protocol: "TCP",
+			}},
 			SessionAffinity: "None",
 		},
 	}
@@ -743,8 +830,10 @@ func runServiceTest(client *client.Client) {
 			Selector: map[string]string{
 				"name": "thisisalonglabel",
 			},
-			Port:            8080,
-			Protocol:        "TCP",
+			Ports: []api.ServicePort{{
+				Port:     8080,
+				Protocol: "TCP",
+			}},
 			SessionAffinity: "None",
 		},
 	}
@@ -753,7 +842,8 @@ func runServiceTest(client *client.Client) {
 		glog.Fatalf("Failed to create service: %v, %v", svc3, err)
 	}
 
-	if err := wait.Poll(time.Second, time.Second*30, endpointsSet(client, svc1.Namespace, svc1.Name, 1)); err != nil {
+	// TODO Reduce the timeouts in this test when endpoints controller is sped up. See #6045.
+	if err := wait.Poll(time.Second, time.Second*60, endpointsSet(client, svc1.Namespace, svc1.Name, 1)); err != nil {
 		glog.Fatalf("FAILED: unexpected endpoints: %v", err)
 	}
 	// A second service with the same port.
@@ -763,8 +853,10 @@ func runServiceTest(client *client.Client) {
 			Selector: map[string]string{
 				"name": "thisisalonglabel",
 			},
-			Port:            8080,
-			Protocol:        "TCP",
+			Ports: []api.ServicePort{{
+				Port:     8080,
+				Protocol: "TCP",
+			}},
 			SessionAffinity: "None",
 		},
 	}
@@ -772,12 +864,12 @@ func runServiceTest(client *client.Client) {
 	if err != nil {
 		glog.Fatalf("Failed to create service: %v, %v", svc2, err)
 	}
-	if err := wait.Poll(time.Second, time.Second*30, endpointsSet(client, svc2.Namespace, svc2.Name, 1)); err != nil {
+	if err := wait.Poll(time.Second, time.Second*60, endpointsSet(client, svc2.Namespace, svc2.Name, 1)); err != nil {
 		glog.Fatalf("FAILED: unexpected endpoints: %v", err)
 	}
 
-	if ok, err := endpointsSet(client, svc3.Namespace, svc3.Name, 0)(); !ok || err != nil {
-		glog.Fatalf("FAILED: service in other namespace should have no endpoints: %v %v", ok, err)
+	if err := wait.Poll(time.Second, time.Second*60, endpointsSet(client, svc3.Namespace, svc3.Name, 0)); err != nil {
+		glog.Fatalf("FAILED: service in other namespace should have no endpoints: %v", err)
 	}
 
 	svcList, err := client.Services(api.NamespaceAll).List(labels.Everything())
@@ -795,10 +887,68 @@ func runServiceTest(client *client.Client) {
 	glog.Info("Service test passed.")
 }
 
+func runSchedulerNoPhantomPodsTest(client *client.Client) {
+	pod := &api.Pod{
+		Spec: api.PodSpec{
+			Containers: []api.Container{
+				{
+					Name:  "c1",
+					Image: "kubernetes/pause",
+					Ports: []api.ContainerPort{
+						{ContainerPort: 1234, HostPort: 9999},
+					},
+					ImagePullPolicy: api.PullIfNotPresent,
+				},
+			},
+		},
+	}
+
+	// Assuming we only have two kublets, the third pod here won't schedule
+	// if the scheduler doesn't correctly handle the delete for the second
+	// pod.
+	pod.ObjectMeta.Name = "phantom.foo"
+	foo, err := client.Pods(api.NamespaceDefault).Create(pod)
+	if err != nil {
+		glog.Fatalf("Failed to create pod: %v, %v", pod, err)
+	}
+	if err := wait.Poll(time.Second, time.Second*30, podRunning(client, foo.Namespace, foo.Name)); err != nil {
+		glog.Fatalf("FAILED: pod never started running %v", err)
+	}
+
+	pod.ObjectMeta.Name = "phantom.bar"
+	bar, err := client.Pods(api.NamespaceDefault).Create(pod)
+	if err != nil {
+		glog.Fatalf("Failed to create pod: %v, %v", pod, err)
+	}
+	if err := wait.Poll(time.Second, time.Second*30, podRunning(client, bar.Namespace, bar.Name)); err != nil {
+		glog.Fatalf("FAILED: pod never started running %v", err)
+	}
+
+	// Delete a pod to free up room.
+	glog.Infof("Deleting pod %v", bar.Name)
+	err = client.Pods(api.NamespaceDefault).Delete(bar.Name)
+	if err != nil {
+		glog.Fatalf("FAILED: couldn't delete pod %q: %v", bar.Name, err)
+	}
+
+	pod.ObjectMeta.Name = "phantom.baz"
+	baz, err := client.Pods(api.NamespaceDefault).Create(pod)
+	if err != nil {
+		glog.Fatalf("Failed to create pod: %v, %v", pod, err)
+	}
+	if err := wait.Poll(time.Second, time.Second*30, podRunning(client, baz.Namespace, baz.Name)); err != nil {
+		glog.Fatalf("FAILED: (Scheduler probably didn't process deletion of 'phantom.bar') Pod never started running: %v", err)
+	}
+
+	glog.Info("Scheduler doesn't make phantom pods: test passed.")
+}
+
 type testFunc func(*client.Client)
 
 func addFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&apiVersion, "apiVersion", latest.Version, "API version that should be used by the client for communicating with the server")
+	fs.IntVar(
+		&maxConcurrency, "maxConcurrency", -1, "Maximum number of tests to be run simultaneously. Unlimited if set to negative.")
 }
 
 func main() {
@@ -846,16 +996,26 @@ func main() {
 		},
 	}
 
+	// Only run at most maxConcurrency tests in parallel.
+	if maxConcurrency <= 0 {
+		maxConcurrency = len(testFuncs)
+	}
+	glog.Infof("Running %d tests in parallel.", maxConcurrency)
+	ch := make(chan struct{}, maxConcurrency)
+
 	var wg sync.WaitGroup
 	wg.Add(len(testFuncs))
 	for i := range testFuncs {
 		f := testFuncs[i]
 		go func() {
+			ch <- struct{}{}
 			f(kubeClient)
+			<-ch
 			wg.Done()
 		}()
 	}
 	wg.Wait()
+	close(ch)
 
 	// Check that kubelet tried to make the containers.
 	// Using a set to list unique creation attempts. Our fake is
@@ -885,6 +1045,11 @@ func main() {
 		glog.Fatalf("Expected 16 containers; got %v\n\nlist of created containers:\n\n%#v\n\nDocker 1 Created:\n\n%#v\n\nDocker 2 Created:\n\n%#v\n\n", len(createdConts), createdConts.List(), fakeDocker1.Created, fakeDocker2.Created)
 	}
 	glog.Infof("OK - found created containers: %#v", createdConts.List())
+
+	// This test doesn't run with the others because it can't run in
+	// parallel and also it schedules extra pods which would change the
+	// above pod counting logic.
+	runSchedulerNoPhantomPodsTest(kubeClient)
 }
 
 // ServeCachedManifestFile serves a file for kubelet to read.
@@ -911,7 +1076,7 @@ const (
 			"containers": [
 				{
 					"name": "redis",
-					"image": "dockerfile/redis",
+					"image": "redis",
 					"volumeMounts": [{
 						"name": "redis-data",
 						"mountPath": "/data"
@@ -939,7 +1104,7 @@ const (
 id: container-vm-guestbook-manifest
 containers:
   - name: redis
-    image: dockerfile/redis
+    image: redis
     volumeMounts:
       - name: redis-data
         mountPath: /data

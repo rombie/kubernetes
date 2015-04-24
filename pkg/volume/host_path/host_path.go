@@ -47,15 +47,22 @@ func (plugin *hostPathPlugin) Name() string {
 	return hostPathPluginName
 }
 
-func (plugin *hostPathPlugin) CanSupport(spec *api.Volume) bool {
-	if spec.HostPath != nil {
-		return true
-	}
-	return false
+func (plugin *hostPathPlugin) CanSupport(spec *volume.Spec) bool {
+	return spec.VolumeSource.HostPath != nil || spec.PersistentVolumeSource.HostPath != nil
 }
 
-func (plugin *hostPathPlugin) NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
-	return &hostPath{spec.HostPath.Path}, nil
+func (plugin *hostPathPlugin) GetAccessModes() []api.AccessModeType {
+	return []api.AccessModeType{
+		api.ReadWriteOnce,
+	}
+}
+
+func (plugin *hostPathPlugin) NewBuilder(spec *volume.Spec, podRef *api.ObjectReference, _ volume.VolumeOptions) (volume.Builder, error) {
+	if spec.VolumeSource.HostPath != nil {
+		return &hostPath{spec.VolumeSource.HostPath.Path}, nil
+	} else {
+		return &hostPath{spec.PersistentVolumeSource.HostPath.Path}, nil
+	}
 }
 
 func (plugin *hostPathPlugin) NewCleaner(volName string, podUID types.UID) (volume.Cleaner, error) {

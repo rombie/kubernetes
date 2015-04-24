@@ -36,9 +36,6 @@ if [ "$?" != "0" ]; then
   exit 1
 fi
 
-echo "Starting etcd"
-kube::etcd::start
-
 # Shut down anyway if there's an error.
 set +e
 
@@ -48,6 +45,17 @@ API_HOST=${API_HOST:-127.0.0.1}
 API_CORS_ALLOWED_ORIGINS=${API_CORS_ALLOWED_ORIGINS:-"/127.0.0.1(:[0-9]+)?$,/localhost(:[0-9]+)?$"}
 KUBELET_PORT=${KUBELET_PORT:-10250}
 LOG_LEVEL=${LOG_LEVEL:-3}
+CHAOS_CHANCE=${CHAOS_CHANCE:-0.0}
+
+# For the common local scenario, fail fast if server is already running.
+# this can happen if you run local-up-cluster.sh twice and kill etcd in between.
+curl $API_HOST:$API_PORT
+if [ ! $? -eq 0 ]; then
+    echo "API SERVER port is free, proceeding..."
+else
+    echo "ERROR starting API SERVER, exiting.  Some host on $API_HOST is serving already on $API_PORT"
+    exit 1
+fi
 
 # Detect the OS name/arch so that we can find our binary
 case "$(uname -s)" in
@@ -96,17 +104,24 @@ cleanup()
     [[ -n "${PROXY_PID-}" ]] && sudo kill "${PROXY_PID}"
     [[ -n "${SCHEDULER_PID-}" ]] && sudo kill "${SCHEDULER_PID}"
 
-    [[ -n "${ETCD_PID-}" ]] && kill "${ETCD_PID}"
-    [[ -n "${ETCD_DIR-}" ]] && rm -rf "${ETCD_DIR}"
+    [[ -n "${ETCD_PID-}" ]] && kube::etcd::stop
+    [[ -n "${ETCD_DIR-}" ]] && kube::etcd::clean_etcd_dir
 
     exit 0
 }
 
 trap cleanup EXIT
 
+echo "Starting etcd"
+kube::etcd::start
+
+# Admission Controllers to invoke prior to persisting objects in cluster
+ADMISSION_CONTROL=NamespaceLifecycle,NamespaceAutoProvision,LimitRanger,ResourceQuota
+
 APISERVER_LOG=/tmp/kube-apiserver.log
 sudo -E "${GO_OUT}/kube-apiserver" \
   --v=${LOG_LEVEL} \
+  --admission_control="${ADMISSION_CONTROL}" \
   --address="${API_HOST}" \
   --port="${API_PORT}" \
   --runtime_config=api/v1beta3 \
@@ -117,7 +132,7 @@ APISERVER_PID=$!
 
 # Wait for kube-apiserver to come up before launching the rest of the components.
 echo "Waiting for apiserver to come up"
-kube::util::wait_for_url "http://${API_HOST}:${API_PORT}/api/v1beta1/pods" "apiserver: " 1 10 || exit 1
+kube::util::wait_for_url "http://${API_HOST}:${API_PORT}/api/v1beta3/pods" "apiserver: " 1 10 || exit 1
 
 CTLRMGR_LOG=/tmp/kube-controller-manager.log
 sudo -E "${GO_OUT}/kube-controller-manager" \
@@ -129,6 +144,7 @@ CTLRMGR_PID=$!
 KUBELET_LOG=/tmp/kubelet.log
 sudo -E "${GO_OUT}/kubelet" \
   --v=${LOG_LEVEL} \
+  --chaos_chance="${CHAOS_CHANCE}" \
   --hostname_override="127.0.0.1" \
   --address="127.0.0.1" \
   --api_servers="${API_HOST}:${API_PORT}" \
@@ -160,8 +176,8 @@ Logs:
 
 To start using your cluster, open up another terminal/tab and run:
 
-  cluster/kubectl.sh config set-cluster local --server=http://${API_HOST}:${API_PORT} --insecure-skip-tls-verify=true --global
-  cluster/kubectl.sh config set-context local --cluster=local --global
+  cluster/kubectl.sh config set-cluster local --server=http://${API_HOST}:${API_PORT} --insecure-skip-tls-verify=true
+  cluster/kubectl.sh config set-context local --cluster=local
   cluster/kubectl.sh config use-context local
   cluster/kubectl.sh
 EOF

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/exec"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
@@ -58,36 +59,47 @@ func (plugin *gcePersistentDiskPlugin) Name() string {
 	return gcePersistentDiskPluginName
 }
 
-func (plugin *gcePersistentDiskPlugin) CanSupport(spec *api.Volume) bool {
+func (plugin *gcePersistentDiskPlugin) CanSupport(spec *volume.Spec) bool {
 	if plugin.legacyMode {
 		// Legacy mode instances can be cleaned up but not created anew.
 		return false
 	}
 
-	if spec.GCEPersistentDisk != nil {
-		return true
-	}
-	return false
+	return spec.VolumeSource.GCEPersistentDisk != nil || spec.PersistentVolumeSource.GCEPersistentDisk != nil
 }
 
-func (plugin *gcePersistentDiskPlugin) NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
+func (plugin *gcePersistentDiskPlugin) GetAccessModes() []api.AccessModeType {
+	return []api.AccessModeType{
+		api.ReadWriteOnce,
+		api.ReadOnlyMany,
+	}
+}
+
+func (plugin *gcePersistentDiskPlugin) NewBuilder(spec *volume.Spec, podRef *api.ObjectReference, _ volume.VolumeOptions) (volume.Builder, error) {
 	// Inject real implementations here, test through the internal function.
 	return plugin.newBuilderInternal(spec, podRef.UID, &GCEDiskUtil{}, mount.New())
 }
 
-func (plugin *gcePersistentDiskPlugin) newBuilderInternal(spec *api.Volume, podUID types.UID, manager pdManager, mounter mount.Interface) (volume.Builder, error) {
+func (plugin *gcePersistentDiskPlugin) newBuilderInternal(spec *volume.Spec, podUID types.UID, manager pdManager, mounter mount.Interface) (volume.Builder, error) {
 	if plugin.legacyMode {
 		// Legacy mode instances can be cleaned up but not created anew.
 		return nil, fmt.Errorf("legacy mode: can not create new instances")
 	}
 
-	pdName := spec.GCEPersistentDisk.PDName
-	fsType := spec.GCEPersistentDisk.FSType
-	partition := ""
-	if spec.GCEPersistentDisk.Partition != 0 {
-		partition = strconv.Itoa(spec.GCEPersistentDisk.Partition)
+	var gce *api.GCEPersistentDiskVolumeSource
+	if spec.VolumeSource.GCEPersistentDisk != nil {
+		gce = spec.VolumeSource.GCEPersistentDisk
+	} else {
+		gce = spec.PersistentVolumeSource.GCEPersistentDisk
 	}
-	readOnly := spec.GCEPersistentDisk.ReadOnly
+
+	pdName := gce.PDName
+	fsType := gce.FSType
+	partition := ""
+	if gce.Partition != 0 {
+		partition = strconv.Itoa(gce.Partition)
+	}
+	readOnly := gce.ReadOnly
 
 	return &gcePersistentDisk{
 		podUID:      podUID,
@@ -175,7 +187,7 @@ func (pd *gcePersistentDisk) SetUpAt(dir string) error {
 	}
 
 	// TODO: handle failed mounts here.
-	mountpoint, err := mount.IsMountPoint(dir)
+	mountpoint, err := pd.mounter.IsMountPoint(dir)
 	glog.V(4).Infof("PersistentDisk set up: %s %v %v", dir, mountpoint, err)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -203,7 +215,7 @@ func (pd *gcePersistentDisk) SetUpAt(dir string) error {
 	// Perform a bind mount to the full path to allow duplicate mounts of the same PD.
 	err = pd.mounter.Mount(globalPDPath, dir, "", mount.FlagBind|flags, "")
 	if err != nil {
-		mountpoint, mntErr := mount.IsMountPoint(dir)
+		mountpoint, mntErr := pd.mounter.IsMountPoint(dir)
 		if mntErr != nil {
 			glog.Errorf("isMountpoint check failed: %v", mntErr)
 			return err
@@ -213,7 +225,7 @@ func (pd *gcePersistentDisk) SetUpAt(dir string) error {
 				glog.Errorf("Failed to unmount: %v", mntErr)
 				return err
 			}
-			mountpoint, mntErr := mount.IsMountPoint(dir)
+			mountpoint, mntErr := pd.mounter.IsMountPoint(dir)
 			if mntErr != nil {
 				glog.Errorf("isMountpoint check failed: %v", mntErr)
 				return err
@@ -242,7 +254,7 @@ func (pd *gcePersistentDisk) GetPath() string {
 	if pd.legacyMode {
 		name = gcePersistentDiskPluginLegacyName
 	}
-	return pd.plugin.host.GetPodVolumeDir(pd.podUID, volume.EscapePluginName(name), pd.volName)
+	return pd.plugin.host.GetPodVolumeDir(pd.podUID, util.EscapeQualifiedNameForDisk(name), pd.volName)
 }
 
 // Unmounts the bind mount, and detaches the disk only if the PD
@@ -254,7 +266,7 @@ func (pd *gcePersistentDisk) TearDown() error {
 // Unmounts the bind mount, and detaches the disk only if the PD
 // resource was the last reference to that disk on the kubelet.
 func (pd *gcePersistentDisk) TearDownAt(dir string) error {
-	mountpoint, err := mount.IsMountPoint(dir)
+	mountpoint, err := pd.mounter.IsMountPoint(dir)
 	if err != nil {
 		return err
 	}
@@ -279,7 +291,7 @@ func (pd *gcePersistentDisk) TearDownAt(dir string) error {
 			return err
 		}
 	}
-	mountpoint, mntErr := mount.IsMountPoint(dir)
+	mountpoint, mntErr := pd.mounter.IsMountPoint(dir)
 	if mntErr != nil {
 		glog.Errorf("isMountpoint check failed: %v", mntErr)
 		return err

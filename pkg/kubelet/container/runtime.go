@@ -17,26 +17,39 @@ limitations under the License.
 package container
 
 import (
+	"fmt"
+	"io"
+	"strings"
+
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 )
 
+type Version interface {
+	// Compare compares two versions of the runtime. On success it returns -1
+	// if the version is less than the other, 1 if it is greater than the other,
+	// or 0 if they are equal.
+	Compare(other string) (int, error)
+	// String returns a string that represents the version.
+	String() string
+}
+
 // Runtime interface defines the interfaces that should be implemented
 // by a container runtime.
 type Runtime interface {
-	// Version returns a map of version information of the container runtime.
-	Version() (map[string]string, error)
+	// Version returns the version information of the container runtime.
+	Version() (Version, error)
 	// GetPods returns a list containers group by pods. The boolean parameter
 	// specifies whether the runtime returns all containers including those already
 	// exited and dead containers (used for garbage collection).
 	GetPods(all bool) ([]*Pod, error)
 	// RunPod starts all the containers of a pod within a namespace.
-	RunPod(*api.Pod, map[string]volume.VolumePlugin) error
+	RunPod(*api.Pod, map[string]volume.Volume) error
 	// KillPod kills all the containers of a pod.
 	KillPod(*api.Pod) error
 	// RunContainerInPod starts a container within the same namespace of a pod.
-	RunContainerInPod(api.Container, *api.Pod, map[string]volume.VolumePlugin) error
+	RunContainerInPod(api.Container, *api.Pod, map[string]volume.Volume) error
 	// KillContainerInPod kills a container in the pod.
 	KillContainerInPod(api.Container, *api.Pod) error
 	// GetPodStatus retrieves the status of the pod, including the information of
@@ -46,7 +59,17 @@ type Runtime interface {
 	// not managed by kubelet. If 'all' is false, then only running containers
 	// are returned.
 	GetContainers(all bool) ([]*Container, error)
-	// TODO(yifan): Pull/Remove images
+	// TODO(vmarmol): Merge RunInContainer and ExecInContainer.
+	// Runs the command in the container of the specified pod using nsinit.
+	RunInContainer(container api.Container, pod *api.Pod, cmd []string)
+	// Runs the command in the container of the specified pod using nsenter.
+	// Attaches the processes stdin, stdout, and stderr. Optionally uses a
+	// tty.
+	ExecInContainer(container api.Container, pod *api.Pod, stdin io.Reader, stdout, stderr io.WriteCloser, tty bool)
+	// Pull pulls an image from the network to local storage.
+	Pull(image string)
+	// IsImagePresent checks whether the container image is already in the local storage.
+	IsImagePresent(image string) (bool, error)
 }
 
 // Pod is a group of containers, with the status of the pod.
@@ -67,6 +90,42 @@ type Pod struct {
 	Status api.PodStatus
 }
 
+// ContainerID is a type that identifies a container.
+type ContainerID struct {
+	// The type of the container runtime. e.g. 'docker', 'rkt'.
+	Type string
+	// The identification of the container, this is comsumable by
+	// the underlying container runtime. (Note that the container
+	// runtime interface still takes the whole struct as input).
+	ID string
+}
+
+func BuildContainerID(typ, ID string) ContainerID {
+	return ContainerID{Type: typ, ID: ID}
+}
+
+func (c *ContainerID) ParseString(data string) error {
+	// Trim the quotes and split the type and ID.
+	parts := strings.Split(strings.Trim(data, "\""), "://")
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid container ID: %q", data)
+	}
+	c.Type, c.ID = parts[0], parts[1]
+	return nil
+}
+
+func (c *ContainerID) String() string {
+	return fmt.Sprintf("%s://%s", c.Type, c.ID)
+}
+
+func (c *ContainerID) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf("%q", c.String())), nil
+}
+
+func (c *ContainerID) UnmarshalJSON(data []byte) error {
+	return c.ParseString(string(data))
+}
+
 // Container provides the runtime information for a container, such as ID, hash,
 // status of the container.
 type Container struct {
@@ -81,4 +140,99 @@ type Container struct {
 	// Hash of the container, used for comparison. Optional for containers
 	// not managed by kubelet.
 	Hash uint64
+	// The timestamp of the creation time of the container.
+	// TODO(yifan): Consider to move it to api.ContainerStatus.
+	Created int64
+}
+
+// RunContainerOptions specify the options which are necessary for running containers
+type RunContainerOptions struct {
+	// The environment variables, they are in the form of 'key=value'.
+	Envs []string
+	// The mounts for the containers, they are in the form of:
+	// 'hostPath:containerPath', or
+	// 'hostPath:containerPath:ro', if the path read only.
+	Binds []string
+	// If the container has specified the TerminationMessagePath, then
+	// this directory will be used to create and mount the log file to
+	// container.TerminationMessagePath
+	PodContainerDir string
+	// The list of DNS servers for the container to use.
+	DNS []string
+	// The list of DNS search domains.
+	DNSSearch []string
+	// Docker namespace identifiers(currently we have 'NetMode' and 'IpcMode'.
+	// These are for docker to attach a container in a pod to the pod infra
+	// container's namespace.
+	// TODO(yifan): Remove these after we pushed the pod infra container logic
+	// into docker's container runtime.
+	NetMode string
+	IpcMode string
+}
+
+type Pods []*Pod
+
+// FindPodByID finds and returns a pod in the pod list by UID. It will return an empty pod
+// if not found.
+func (p Pods) FindPodByID(podUID types.UID) Pod {
+	for i := range p {
+		if p[i].ID == podUID {
+			return *p[i]
+		}
+	}
+	return Pod{}
+}
+
+// FindPodByFullName finds and returns a pod in the pod list by the full name.
+// It will return an empty pod if not found.
+func (p Pods) FindPodByFullName(podFullName string) Pod {
+	for i := range p {
+		if BuildPodFullName(p[i].Name, p[i].Namespace) == podFullName {
+			return *p[i]
+		}
+	}
+	return Pod{}
+}
+
+// FindPod combines FindPodByID and FindPodByFullName, it finds and returns a pod in the
+// pod list either by the full name or the pod ID. It will return an empty pod
+// if not found.
+func (p Pods) FindPod(podFullName string, podUID types.UID) Pod {
+	if len(podFullName) > 0 {
+		return p.FindPodByFullName(podFullName)
+	}
+	return p.FindPodByID(podUID)
+}
+
+// FindContainerByName returns a container in the pod with the given name.
+// When there are multiple containers with the same name, the first match will
+// be returned.
+func (p *Pod) FindContainerByName(containerName string) *Container {
+	for _, c := range p.Containers {
+		if c.Name == containerName {
+			return c
+		}
+	}
+	return nil
+}
+
+// GetPodFullName returns a name that uniquely identifies a pod.
+func GetPodFullName(pod *api.Pod) string {
+	// Use underscore as the delimiter because it is not allowed in pod name
+	// (DNS subdomain format), while allowed in the container name format.
+	return fmt.Sprintf("%s_%s", pod.Name, pod.Namespace)
+}
+
+// Build the pod full name from pod name and namespace.
+func BuildPodFullName(name, namespace string) string {
+	return name + "_" + namespace
+}
+
+// Parse the pod full name.
+func ParsePodFullName(podFullName string) (string, string, error) {
+	parts := strings.Split(podFullName, "_")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("failed to parse the pod full name %q", podFullName)
+	}
+	return parts[0], parts[1], nil
 }

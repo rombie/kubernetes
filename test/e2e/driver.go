@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
 	"github.com/onsi/ginkgo"
@@ -32,10 +33,12 @@ import (
 
 type testResult bool
 
-type GCEConfig struct {
+type CloudConfig struct {
 	ProjectID  string
 	Zone       string
 	MasterName string
+
+	Provider cloudprovider.Interface
 }
 
 func init() {
@@ -53,8 +56,8 @@ func (t *testResult) Fail() { *t = false }
 
 // Run each Go end-to-end-test. This function assumes the
 // creation of a test cluster.
-func RunE2ETests(kubeConfig, authConfig, certDir, host, repoRoot, provider string, gceConfig *GCEConfig, orderseed int64, times int, reportDir string, testList []string) {
-	testContext = testContextType{kubeConfig, authConfig, certDir, host, repoRoot, provider, *gceConfig}
+func RunE2ETests(context *TestContextType, orderseed int64, times int, reportDir string, testList []string) {
+	testContext = *context
 	util.ReallyCrash = true
 	util.InitLogs()
 	defer util.FlushLogs()
@@ -70,8 +73,12 @@ func RunE2ETests(kubeConfig, authConfig, certDir, host, repoRoot, provider strin
 		config.GinkgoConfig.FocusString = `\b(` + strings.Join(testRegexps, "|") + `)\b`
 	}
 
-	// TODO: Make orderseed work again.
+	// Disable density test unless it's explicitly requested.
+	if config.GinkgoConfig.FocusString == "" && config.GinkgoConfig.SkipString == "" {
+		config.GinkgoConfig.SkipString = "Skipped"
+	}
 
+	// TODO: Make orderseed work again.
 	var passed testResult = true
 	gomega.RegisterFailHandler(ginkgo.Fail)
 	// Run the existing tests with output to console + JUnit for Jenkins

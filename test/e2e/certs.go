@@ -20,33 +20,29 @@ import (
 	"fmt"
 	"os/exec"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("MasterCerts", func() {
-	var c *client.Client
-
 	BeforeEach(func() {
 		var err error
-		c, err = loadClient()
+		_, err = loadClient()
 		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("should have all expected certs on the master", func() {
-		if testContext.provider != "gce" && testContext.provider != "gke" {
-			By(fmt.Sprintf("Skipping MasterCerts test for cloud provider %s (only supported for gce and gke)", testContext.provider))
+		if !providerIs("gce", "gke") {
+			By(fmt.Sprintf("Skipping MasterCerts test for cloud provider %s (only supported for gce and gke)", testContext.Provider))
 			return
 		}
 
 		for _, certFile := range []string{"kubecfg.key", "kubecfg.crt", "ca.crt"} {
-			cmd := exec.Command("gcloud", "compute", "ssh", "--project", testContext.gceConfig.ProjectID,
-				"--zone", testContext.gceConfig.Zone, testContext.gceConfig.MasterName,
+			cmd := exec.Command("gcloud", "compute", "ssh", "--project", testContext.CloudConfig.ProjectID,
+				"--zone", testContext.CloudConfig.Zone, testContext.CloudConfig.MasterName,
 				"--command", fmt.Sprintf("ls /srv/kubernetes/%s", certFile))
-			if _, err := cmd.CombinedOutput(); err != nil {
-				Fail(fmt.Sprintf("Error checking for cert file %s on master: %v", certFile, err))
+			if output, err := cmd.CombinedOutput(); err != nil {
+				Failf("Error checking for cert file %s on master: %v\n%s", certFile, err, string(output))
 			}
 		}
 	})

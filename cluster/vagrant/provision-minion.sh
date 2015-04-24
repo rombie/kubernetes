@@ -69,14 +69,12 @@ grains:
   cloud: vagrant
   network_mode: openvswitch
   node_ip: '$(echo "$MINION_IP" | sed -e "s/'/''/g")'
-  etcd_servers: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   api_servers: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   networkInterfaceName: eth1
-  apiservers: '$(echo "$MASTER_IP" | sed -e "s/'/''/g")'
   roles:
     - kubernetes-pool
   cbr-cidr: '$(echo "$CONTAINER_SUBNET" | sed -e "s/'/''/g")'
-  minion_ip: '$(echo "$MINION_IP" | sed -e "s/'/''/g")'
+  hostname_override: '$(echo "$MINION_IP" | sed -e "s/'/''/g")'
 EOF
 
 if ! which salt-minion >/dev/null 2>&1; then

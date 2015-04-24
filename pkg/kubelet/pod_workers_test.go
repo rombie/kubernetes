@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
+	kubecontainer "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/container"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 )
@@ -38,15 +39,16 @@ func newPod(uid, name string) *api.Pod {
 
 func createPodWorkers() (*podWorkers, map[types.UID][]string) {
 	fakeDocker := &dockertools.FakeDockerClient{}
-	fakeDockerCache := dockertools.NewFakeDockerCache(fakeDocker)
-	recorder := &record.FakeRecorder{}
+	fakeRecorder := &record.FakeRecorder{}
+	dockerManager := dockertools.NewDockerManager(fakeDocker, fakeRecorder, nil, nil, dockertools.PodInfraContainerImage, 0, 0)
+	fakeRuntimeCache := kubecontainer.NewFakeRuntimeCache(dockerManager)
 
 	lock := sync.Mutex{}
 	processed := make(map[types.UID][]string)
 
 	podWorkers := newPodWorkers(
-		fakeDockerCache,
-		func(pod *api.Pod, hasMirrorPod bool, containers dockertools.DockerContainers) error {
+		fakeRuntimeCache,
+		func(pod *api.Pod, mirrorPod *api.Pod, runningPod kubecontainer.Pod) error {
 			func() {
 				lock.Lock()
 				defer lock.Unlock()
@@ -54,7 +56,7 @@ func createPodWorkers() (*podWorkers, map[types.UID][]string) {
 			}()
 			return nil
 		},
-		recorder,
+		fakeRecorder,
 	)
 	return podWorkers, processed
 }
@@ -83,7 +85,7 @@ func TestUpdatePod(t *testing.T) {
 	numPods := 20
 	for i := 0; i < numPods; i++ {
 		for j := i; j < numPods; j++ {
-			podWorkers.UpdatePod(newPod(string(j), string(i)), false, func() {})
+			podWorkers.UpdatePod(newPod(string(j), string(i)), nil, func() {})
 		}
 	}
 	drainWorkers(podWorkers, numPods)
@@ -116,7 +118,7 @@ func TestForgetNonExistingPodWorkers(t *testing.T) {
 
 	numPods := 20
 	for i := 0; i < numPods; i++ {
-		podWorkers.UpdatePod(newPod(string(i), "name"), false, func() {})
+		podWorkers.UpdatePod(newPod(string(i), "name"), nil, func() {})
 	}
 	drainWorkers(podWorkers, numPods)
 

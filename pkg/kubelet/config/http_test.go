@@ -130,7 +130,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 				Containers: []v1beta1.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta1.PullAlways}}},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "foo" + "-" + hostname,
@@ -138,6 +138,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/foo-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -154,7 +155,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 				Containers: []v1beta1.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}}},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "111" + "-" + hostname,
@@ -162,6 +163,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/111-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -178,7 +180,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 				Containers: []v1beta1.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta1.PullAlways}}},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "foo" + "-" + hostname,
@@ -186,6 +188,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/foo-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -206,7 +209,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 			},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "foo" + "-" + hostname,
@@ -214,6 +217,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/foo-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -223,7 +227,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 							ImagePullPolicy:        "Always"}},
 					},
 				},
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "222",
 						Name:      "bar" + "-" + hostname,
@@ -231,6 +235,7 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/bar-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -278,9 +283,9 @@ func TestExtractManifestFromHTTP(t *testing.T) {
 		if !api.Semantic.DeepEqual(testCase.expected, update) {
 			t.Errorf("%s: Expected: %#v, Got: %#v", testCase.desc, testCase.expected, update)
 		}
-		for i := range update.Pods {
-			if errs := validation.ValidatePod(&update.Pods[i]); len(errs) != 0 {
-				t.Errorf("%s: Expected no validation errors on %#v, Got %v", testCase.desc, update.Pods[i], errors.NewAggregate(errs))
+		for _, pod := range update.Pods {
+			if errs := validation.ValidatePod(pod); len(errs) != 0 {
+				t.Errorf("%s: Expected no validation errors on %#v, Got %v", testCase.desc, pod, errors.NewAggregate(errs))
 			}
 		}
 	}
@@ -312,7 +317,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 			},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "foo" + "-" + hostname,
@@ -320,6 +325,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/foo-" + hostname + "?namespace=mynamespace",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -343,12 +349,13 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 					Namespace: "mynamespace",
 				},
 				Spec: v1beta3.PodSpec{
+					Host:       hostname,
 					Containers: []v1beta3.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta3.PullAlways}},
 				},
 			},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "foo" + "-" + hostname,
@@ -356,6 +363,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/foo-" + hostname + "?namespace=mynamespace",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -380,6 +388,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 							UID:  "111",
 						},
 						Spec: v1beta3.PodSpec{
+							Host:       hostname,
 							Containers: []v1beta3.Container{{Name: "1", Image: "foo", ImagePullPolicy: v1beta3.PullAlways}},
 						},
 					},
@@ -389,6 +398,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 							UID:  "222",
 						},
 						Spec: v1beta3.PodSpec{
+							Host:       hostname,
 							Containers: []v1beta3.Container{{Name: "2", Image: "bar", ImagePullPolicy: ""}},
 						},
 					},
@@ -396,7 +406,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 			},
 			expected: CreatePodUpdate(kubelet.SET,
 				kubelet.HTTPSource,
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "111",
 						Name:      "foo" + "-" + hostname,
@@ -404,6 +414,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/foo-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -413,7 +424,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 							ImagePullPolicy:        "Always"}},
 					},
 				},
-				api.Pod{
+				&api.Pod{
 					ObjectMeta: api.ObjectMeta{
 						UID:       "222",
 						Name:      "bar" + "-" + hostname,
@@ -421,6 +432,7 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 						SelfLink:  "/api/v1beta2/pods/bar-" + hostname + "?namespace=default",
 					},
 					Spec: api.PodSpec{
+						Host:          hostname,
 						RestartPolicy: api.RestartPolicyAlways,
 						DNSPolicy:     api.DNSClusterFirst,
 						Containers: []api.Container{{
@@ -460,9 +472,9 @@ func TestExtractPodsFromHTTP(t *testing.T) {
 		if !api.Semantic.DeepEqual(testCase.expected, update) {
 			t.Errorf("%s: Expected: %#v, Got: %#v", testCase.desc, testCase.expected, update)
 		}
-		for i := range update.Pods {
-			if errs := validation.ValidatePod(&update.Pods[i]); len(errs) != 0 {
-				t.Errorf("%s: Expected no validation errors on %#v, Got %v", testCase.desc, update.Pods[i], errors.NewAggregate(errs))
+		for _, pod := range update.Pods {
+			if errs := validation.ValidatePod(pod); len(errs) != 0 {
+				t.Errorf("%s: Expected no validation errors on %#v, Got %v", testCase.desc, pod, errors.NewAggregate(errs))
 			}
 		}
 	}

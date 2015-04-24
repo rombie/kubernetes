@@ -31,13 +31,45 @@ import (
 // fault-tolerant way.
 type RollingUpdater struct {
 	// Client interface for creating and updating controllers
-	c client.Interface
+	c RollingUpdaterClient
 	// Namespace for resources
 	ns string
 }
 
+// RollingUpdaterConfig is the configuration for a rolling deployment process.
+type RollingUpdaterConfig struct {
+	// Out is a writer for progress output.
+	Out io.Writer
+	// OldRC is an existing controller to be replaced.
+	OldRc *api.ReplicationController
+	// NewRc is a controller that will take ownership of updated pods (will be
+	// created if needed).
+	NewRc *api.ReplicationController
+	// UpdatePeriod is the time to wait between individual pod updates.
+	UpdatePeriod time.Duration
+	// Interval is the time to wait between polling controller status after
+	// update.
+	Interval time.Duration
+	// Timeout is the time to wait for controller updates before giving up.
+	Timeout time.Duration
+	// CleanupPolicy defines the cleanup action to take after the deployment is
+	// complete.
+	CleanupPolicy RollingUpdaterCleanupPolicy
+}
+
+// RollingUpdaterCleanupPolicy is a cleanup action to take after the
+// deployment is complete.
+type RollingUpdaterCleanupPolicy string
+
+const (
+	// DeleteRollingUpdateCleanupPolicy means delete the old controller.
+	DeleteRollingUpdateCleanupPolicy RollingUpdaterCleanupPolicy = "Delete"
+	// PreserveRollingUpdateCleanupPolicy means keep the old controller.
+	PreserveRollingUpdateCleanupPolicy RollingUpdaterCleanupPolicy = "Preserve"
+)
+
 // NewRollingUpdater creates a RollingUpdater from a client
-func NewRollingUpdater(namespace string, c client.Interface) *RollingUpdater {
+func NewRollingUpdater(namespace string, c RollingUpdaterClient) *RollingUpdater {
 	return &RollingUpdater{
 		c,
 		namespace,
@@ -49,23 +81,29 @@ const (
 	desiredReplicasAnnotation = kubectlAnnotationPrefix + "desired-replicas"
 )
 
-// Update all pods for a ReplicationController (oldRc) by creating a new controller (newRc)
-// with 0 replicas, and synchronously resizing oldRc,newRc by 1 until oldRc has 0 replicas
-// and newRc has the original # of desired replicas. oldRc is then deleted.
-// If an update from newRc to oldRc is already in progress, we attempt to drive it to completion.
-// If an error occurs at any step of the update, the error will be returned.
-//  'out' writer for progress output
-//  'oldRc' existing controller to be replaced
-//  'newRc' controller that will take ownership of updated pods (will be created if needed)
-//  'updatePeriod' time to wait between individual pod updates
-//  'interval' time to wait between polling controller status after update
-//  'timeout' time to wait for controller updates before giving up
+// Update all pods for a ReplicationController (oldRc) by creating a new
+// controller (newRc) with 0 replicas, and synchronously resizing oldRc,newRc
+// by 1 until oldRc has 0 replicas and newRc has the original # of desired
+// replicas. Cleanup occurs based on a RollingUpdaterCleanupPolicy.
 //
-// TODO: make this handle performing a rollback of a partially completed rollout.
-func (r *RollingUpdater) Update(out io.Writer, oldRc, newRc *api.ReplicationController, updatePeriod, interval, timeout time.Duration) error {
+// If an update from newRc to oldRc is already in progress, we attempt to
+// drive it to completion. If an error occurs at any step of the update, the
+// error will be returned.
+//
+// TODO: make this handle performing a rollback of a partially completed
+// rollout.
+func (r *RollingUpdater) Update(config *RollingUpdaterConfig) error {
+	out := config.Out
+	oldRc := config.OldRc
+	newRc := config.NewRc
+	updatePeriod := config.UpdatePeriod
+	interval := config.Interval
+	timeout := config.Timeout
+
 	oldName := oldRc.ObjectMeta.Name
 	newName := newRc.ObjectMeta.Name
-
+	retry := &RetryParams{interval, timeout}
+	waitForReplicas := &RetryParams{interval, timeout}
 	if newRc.Spec.Replicas <= 0 {
 		return fmt.Errorf("Invalid controller spec for %s; required: > 0 replicas, actual: %s\n", newName, newRc.Spec)
 	}
@@ -94,7 +132,7 @@ func (r *RollingUpdater) Update(out io.Writer, oldRc, newRc *api.ReplicationCont
 		newRc.ObjectMeta.Annotations[desiredReplicasAnnotation] = fmt.Sprintf("%d", desired)
 		newRc.ObjectMeta.Annotations[sourceIdAnnotation] = sourceId
 		newRc.Spec.Replicas = 0
-		newRc, err = r.c.ReplicationControllers(r.ns).Create(newRc)
+		newRc, err = r.c.CreateReplicationController(r.ns, newRc)
 		if err != nil {
 			return err
 		}
@@ -104,35 +142,50 @@ func (r *RollingUpdater) Update(out io.Writer, oldRc, newRc *api.ReplicationCont
 	for newRc.Spec.Replicas < desired && oldRc.Spec.Replicas != 0 {
 		newRc.Spec.Replicas += 1
 		oldRc.Spec.Replicas -= 1
+		fmt.Printf("At beginning of loop: %s replicas: %d, %s replicas: %d\n",
+			oldName, oldRc.Spec.Replicas,
+			newName, newRc.Spec.Replicas)
 		fmt.Fprintf(out, "Updating %s replicas: %d, %s replicas: %d\n",
 			oldName, oldRc.Spec.Replicas,
 			newName, newRc.Spec.Replicas)
 
-		newRc, err = r.updateAndWait(newRc, interval, timeout)
+		newRc, err = r.resizeAndWait(newRc, retry, waitForReplicas)
 		if err != nil {
 			return err
 		}
 		time.Sleep(updatePeriod)
-		oldRc, err = r.updateAndWait(oldRc, interval, timeout)
+		oldRc, err = r.resizeAndWait(oldRc, retry, waitForReplicas)
 		if err != nil {
 			return err
 		}
+		fmt.Printf("At end of loop: %s replicas: %d, %s replicas: %d\n",
+			oldName, oldRc.Spec.Replicas,
+			newName, newRc.Spec.Replicas)
 	}
 	// delete remaining replicas on oldRc
 	if oldRc.Spec.Replicas != 0 {
 		fmt.Fprintf(out, "Stopping %s replicas: %d -> %d\n",
 			oldName, oldRc.Spec.Replicas, 0)
 		oldRc.Spec.Replicas = 0
-		oldRc, err = r.updateAndWait(oldRc, interval, timeout)
+		oldRc, err = r.resizeAndWait(oldRc, retry, waitForReplicas)
+		// oldRc, err = r.resizeAndWait(oldRc, interval, timeout)
 		if err != nil {
 			return err
 		}
 	}
-	// add remaining replicas on newRc, cleanup annotations
+	// add remaining replicas on newRc
 	if newRc.Spec.Replicas != desired {
 		fmt.Fprintf(out, "Resizing %s replicas: %d -> %d\n",
 			newName, newRc.Spec.Replicas, desired)
 		newRc.Spec.Replicas = desired
+		newRc, err = r.resizeAndWait(newRc, retry, waitForReplicas)
+		if err != nil {
+			return err
+		}
+	}
+	// Clean up annotations
+	if newRc, err = r.c.GetReplicationController(r.ns, newName); err != nil {
+		return err
 	}
 	delete(newRc.ObjectMeta.Annotations, sourceIdAnnotation)
 	delete(newRc.ObjectMeta.Annotations, desiredReplicasAnnotation)
@@ -140,13 +193,21 @@ func (r *RollingUpdater) Update(out io.Writer, oldRc, newRc *api.ReplicationCont
 	if err != nil {
 		return err
 	}
-	// delete old rc
-	fmt.Fprintf(out, "Update succeeded. Deleting %s\n", oldName)
-	return r.c.ReplicationControllers(r.ns).Delete(oldName)
+
+	switch config.CleanupPolicy {
+	case DeleteRollingUpdateCleanupPolicy:
+		// delete old rc
+		fmt.Fprintf(out, "Update succeeded. Deleting %s\n", oldName)
+		return r.c.DeleteReplicationController(r.ns, oldName)
+	case PreserveRollingUpdateCleanupPolicy:
+		return nil
+	default:
+		return nil
+	}
 }
 
 func (r *RollingUpdater) getExistingNewRc(sourceId, name string) (rc *api.ReplicationController, existing bool, err error) {
-	if rc, err = r.c.ReplicationControllers(r.ns).Get(name); err == nil {
+	if rc, err = r.c.GetReplicationController(r.ns, name); err == nil {
 		existing = true
 		annotations := rc.ObjectMeta.Annotations
 		source := annotations[sourceIdAnnotation]
@@ -160,14 +221,62 @@ func (r *RollingUpdater) getExistingNewRc(sourceId, name string) (rc *api.Replic
 	return
 }
 
-func (r *RollingUpdater) updateAndWait(rc *api.ReplicationController, interval, timeout time.Duration) (*api.ReplicationController, error) {
-	rc, err := r.c.ReplicationControllers(r.ns).Update(rc)
+func (r *RollingUpdater) resizeAndWait(rc *api.ReplicationController, retry *RetryParams, wait *RetryParams) (*api.ReplicationController, error) {
+	resizer, err := ResizerFor("ReplicationController", r.c)
 	if err != nil {
 		return nil, err
 	}
-	if err := wait.Poll(interval, timeout,
-		client.ControllerHasDesiredReplicas(r.c, rc)); err != nil {
+	if err := resizer.Resize(rc.Namespace, rc.Name, uint(rc.Spec.Replicas), &ResizePrecondition{-1, ""}, retry, wait); err != nil {
 		return nil, err
 	}
-	return r.c.ReplicationControllers(r.ns).Get(rc.ObjectMeta.Name)
+	return r.c.GetReplicationController(r.ns, rc.ObjectMeta.Name)
+}
+
+func (r *RollingUpdater) updateAndWait(rc *api.ReplicationController, interval, timeout time.Duration) (*api.ReplicationController, error) {
+	rc, err := r.c.UpdateReplicationController(r.ns, rc)
+	if err != nil {
+		return nil, err
+	}
+	if err = wait.Poll(interval, timeout, r.c.ControllerHasDesiredReplicas(rc)); err != nil {
+		return nil, err
+	}
+	return r.c.GetReplicationController(r.ns, rc.ObjectMeta.Name)
+}
+
+// RollingUpdaterClient abstracts access to ReplicationControllers.
+type RollingUpdaterClient interface {
+	GetReplicationController(namespace, name string) (*api.ReplicationController, error)
+	UpdateReplicationController(namespace string, rc *api.ReplicationController) (*api.ReplicationController, error)
+	CreateReplicationController(namespace string, rc *api.ReplicationController) (*api.ReplicationController, error)
+	DeleteReplicationController(namespace, name string) error
+	ControllerHasDesiredReplicas(rc *api.ReplicationController) wait.ConditionFunc
+}
+
+func NewRollingUpdaterClient(c client.Interface) RollingUpdaterClient {
+	return &realRollingUpdaterClient{c}
+}
+
+// realRollingUpdaterClient is a RollingUpdaterClient which uses a Kube client.
+type realRollingUpdaterClient struct {
+	client client.Interface
+}
+
+func (c *realRollingUpdaterClient) GetReplicationController(namespace, name string) (*api.ReplicationController, error) {
+	return c.client.ReplicationControllers(namespace).Get(name)
+}
+
+func (c *realRollingUpdaterClient) UpdateReplicationController(namespace string, rc *api.ReplicationController) (*api.ReplicationController, error) {
+	return c.client.ReplicationControllers(namespace).Update(rc)
+}
+
+func (c *realRollingUpdaterClient) CreateReplicationController(namespace string, rc *api.ReplicationController) (*api.ReplicationController, error) {
+	return c.client.ReplicationControllers(namespace).Create(rc)
+}
+
+func (c *realRollingUpdaterClient) DeleteReplicationController(namespace, name string) error {
+	return c.client.ReplicationControllers(namespace).Delete(name)
+}
+
+func (c *realRollingUpdaterClient) ControllerHasDesiredReplicas(rc *api.ReplicationController) wait.ConditionFunc {
+	return client.ControllerHasDesiredReplicas(c.client, rc)
 }

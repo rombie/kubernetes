@@ -18,8 +18,6 @@ package e2e
 
 import (
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
@@ -68,12 +66,9 @@ var _ = Describe("Secrets", func() {
 			Failf("unable to create test secret %s: %v", secret.Name, err)
 		}
 
-		By(fmt.Sprintf("Creating a pod to consume secret %v", secret.Name))
-		// Make a client pod that verifies that it has the service environment variables.
-		clientName := "client-secrets-" + string(util.NewUUID())
-		clientPod := &api.Pod{
+		pod := &api.Pod{
 			ObjectMeta: api.ObjectMeta{
-				Name: clientName,
+				Name: "pod-secrets-" + string(util.NewUUID()),
 			},
 			Spec: api.PodSpec{
 				Volumes: []api.Volume{
@@ -81,20 +76,18 @@ var _ = Describe("Secrets", func() {
 						Name: volumeName,
 						VolumeSource: api.VolumeSource{
 							Secret: &api.SecretVolumeSource{
-								Target: api.ObjectReference{
-									Kind:      "Secret",
-									Namespace: ns,
-									Name:      name,
-								},
+								SecretName: name,
 							},
 						},
 					},
 				},
 				Containers: []api.Container{
 					{
-						Name:    "catcont",
-						Image:   "busybox",
-						Command: []string{"sh", "-c", "cat /etc/secret-volume/data-1; sleep 600"},
+						Name:  "catcont",
+						Image: "kubernetes/mounttest:0.1",
+						Args: []string{
+							"--file_content=/etc/secret-volume/data-1",
+							"--file_mode=/etc/secret-volume/data-1"},
 						VolumeMounts: []api.VolumeMount{
 							{
 								Name:      volumeName,
@@ -108,51 +101,9 @@ var _ = Describe("Secrets", func() {
 			},
 		}
 
-		defer c.Pods(ns).Delete(clientPod.Name)
-		if _, err := c.Pods(ns).Create(clientPod); err != nil {
-			Failf("Failed to create pod: %v", err)
-		}
-		// Wait for client pod to complete.
-		expectNoError(waitForPodRunning(c, clientPod.Name))
-
-		// Grab its logs.  Get host first.
-		clientPodStatus, err := c.Pods(ns).Get(clientPod.Name)
-		if err != nil {
-			Failf("Failed to get clientPod to know host: %v", err)
-		}
-		By(fmt.Sprintf("Trying to get logs from host %s pod %s container %s: %v",
-			clientPodStatus.Status.Host, clientPodStatus.Name, clientPodStatus.Spec.Containers[0].Name, err))
-		var logs []byte
-		start := time.Now()
-
-		// Sometimes the actual containers take a second to get started, try to get logs for 60s
-		for time.Now().Sub(start) < (60 * time.Second) {
-			logs, err = c.Get().
-				Prefix("proxy").
-				Resource("minions").
-				Name(clientPodStatus.Status.Host).
-				Suffix("containerLogs", ns, clientPodStatus.Name, clientPodStatus.Spec.Containers[0].Name).
-				Do().
-				Raw()
-			fmt.Sprintf("clientPod logs:%v\n", string(logs))
-			By(fmt.Sprintf("clientPod logs:%v\n", string(logs)))
-			if strings.Contains(string(logs), "Internal Error") {
-				By(fmt.Sprintf("Failed to get logs from host %s pod %s container %s: %v",
-					clientPodStatus.Status.Host, clientPodStatus.Name, clientPodStatus.Spec.Containers[0].Name, string(logs)))
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			break
-		}
-
-		toFind := []string{
-			"value-1",
-		}
-
-		for _, m := range toFind {
-			Expect(string(logs)).To(ContainSubstring(m), "%q in secret data", m)
-		}
-
-		// We could try a wget the service from the client pod.  But services.sh e2e test covers that pretty well.
+		testContainerOutput("consume secrets", c, pod, []string{
+			"content of file \"/etc/secret-volume/data-1\": value-1",
+			"mode of file \"/etc/secret-volume/data-1\": -r--r--r--",
+		})
 	})
 })

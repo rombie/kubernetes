@@ -29,6 +29,8 @@ import (
 
 	kapi "github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	kclient "github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	kclientcmd "github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd"
+	kclientcmdapi "github.com/GoogleCloudPlatform/kubernetes/pkg/client/clientcmd/api"
 	kfields "github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	klabels "github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	tools "github.com/GoogleCloudPlatform/kubernetes/pkg/tools"
@@ -42,6 +44,7 @@ var (
 	etcd_mutation_timeout = flag.Duration("etcd_mutation_timeout", 10*time.Second, "crash after retrying etcd mutation for a specified duration")
 	etcd_server           = flag.String("etcd-server", "http://127.0.0.1:4001", "URL to etcd server")
 	verbose               = flag.Bool("verbose", false, "log extra information")
+	kubecfg_file          = flag.String("kubecfg_file", "", "Location of kubecfg file for access to kubernetes service")
 )
 
 func removeDNS(record string, etcdClient *etcd.Client) error {
@@ -57,22 +60,27 @@ func addDNS(record string, service *kapi.Service, etcdClient *etcd.Client) error
 		return nil
 	}
 
-	svc := skymsg.Service{
-		Host:     service.Spec.PortalIP,
-		Port:     service.Spec.Port,
-		Priority: 10,
-		Weight:   10,
-		Ttl:      30,
-	}
-	b, err := json.Marshal(svc)
-	if err != nil {
-		return err
-	}
-	// Set with no TTL, and hope that kubernetes events are accurate.
+	for i := range service.Spec.Ports {
+		svc := skymsg.Service{
+			Host:     service.Spec.PortalIP,
+			Port:     service.Spec.Ports[i].Port,
+			Priority: 10,
+			Weight:   10,
+			Ttl:      30,
+		}
+		b, err := json.Marshal(svc)
+		if err != nil {
+			return err
+		}
+		// Set with no TTL, and hope that kubernetes events are accurate.
 
-	log.Printf("Setting dns record: %v -> %s:%d\n", record, service.Spec.PortalIP, service.Spec.Port)
-	_, err = etcdClient.Set(skymsg.Path(record), string(b), uint64(0))
-	return err
+		log.Printf("Setting DNS record: %v -> %s:%d\n", record, service.Spec.PortalIP, service.Spec.Ports[i].Port)
+		_, err = etcdClient.Set(skymsg.Path(record), string(b), uint64(0))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Implements retry logic for arbitrary mutator. Crashes after retrying for
@@ -123,22 +131,40 @@ func newEtcdClient() (client *etcd.Client) {
 
 // TODO: evaluate using pkg/client/clientcmd
 func newKubeClient() (*kclient.Client, error) {
-	config := &kclient.Config{}
-
-	masterHost := os.Getenv("KUBERNETES_RO_SERVICE_HOST")
-	if masterHost == "" {
-		log.Fatalf("KUBERNETES_RO_SERVICE_HOST is not defined")
+	var config *kclient.Config
+	if *kubecfg_file == "" {
+		// No kubecfg file provided. Use kubernetes_ro service.
+		masterHost := os.Getenv("KUBERNETES_RO_SERVICE_HOST")
+		if masterHost == "" {
+			log.Fatalf("KUBERNETES_RO_SERVICE_HOST is not defined")
+		}
+		masterPort := os.Getenv("KUBERNETES_RO_SERVICE_PORT")
+		if masterPort == "" {
+			log.Fatalf("KUBERNETES_RO_SERVICE_PORT is not defined")
+		}
+		config = &kclient.Config{
+			Host:    fmt.Sprintf("http://%s:%s", masterHost, masterPort),
+			Version: "v1beta1",
+		}
+	} else {
+		masterHost := os.Getenv("KUBERNETES_SERVICE_HOST")
+		if masterHost == "" {
+			log.Fatalf("KUBERNETES_SERVICE_HOST is not defined")
+		}
+		masterPort := os.Getenv("KUBERNETES_SERVICE_PORT")
+		if masterPort == "" {
+			log.Fatalf("KUBERNETES_SERVICE_PORT is not defined")
+		}
+		master := fmt.Sprintf("https://%s:%s", masterHost, masterPort)
+		var err error
+		if config, err = kclientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			&kclientcmd.ClientConfigLoadingRules{ExplicitPath: *kubecfg_file},
+			&kclientcmd.ConfigOverrides{ClusterInfo: kclientcmdapi.Cluster{Server: master}}).ClientConfig(); err != nil {
+			return nil, err
+		}
 	}
-	masterPort := os.Getenv("KUBERNETES_RO_SERVICE_PORT")
-	if masterPort == "" {
-		log.Fatalf("KUBERNETES_RO_SERVICE_PORT is not defined")
-	}
-	config.Host = fmt.Sprintf("http://%s:%s", masterHost, masterPort)
 	log.Printf("Using %s for kubernetes master", config.Host)
-
-	config.Version = "v1beta1"
 	log.Printf("Using kubernetes API %s", config.Version)
-
 	return kclient.New(config)
 }
 

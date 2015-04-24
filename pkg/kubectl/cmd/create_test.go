@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd_test
+package cmd
 
 import (
 	"bytes"
@@ -23,6 +23,16 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
 )
+
+func TestExtraArgsFail(t *testing.T) {
+	buf := bytes.NewBuffer([]byte{})
+
+	f, _, _ := NewAPIFactory()
+	c := NewCmdCreate(f, buf)
+	if ValidateArgs(c, []string{"rc"}) == nil {
+		t.Errorf("unexpected non-error")
+	}
+}
 
 func TestCreateObject(t *testing.T) {
 	_, _, rc := testData()
@@ -45,12 +55,12 @@ func TestCreateObject(t *testing.T) {
 	tf.Namespace = "test"
 	buf := bytes.NewBuffer([]byte{})
 
-	cmd := f.NewCmdCreate(buf)
+	cmd := NewCmdCreate(f, buf)
 	cmd.Flags().Set("filename", "../../../examples/guestbook/redis-master-controller.json")
 	cmd.Run(cmd, []string{})
 
 	// uses the name from the file, not the response
-	if buf.String() != "redis-master-controller\n" {
+	if buf.String() != "replicationcontrollers/redis-master-controller\n" {
 		t.Errorf("unexpected output: %s", buf.String())
 	}
 }
@@ -77,13 +87,13 @@ func TestCreateMultipleObject(t *testing.T) {
 	tf.Namespace = "test"
 	buf := bytes.NewBuffer([]byte{})
 
-	cmd := f.NewCmdCreate(buf)
+	cmd := NewCmdCreate(f, buf)
 	cmd.Flags().Set("filename", "../../../examples/guestbook/redis-master-controller.json")
 	cmd.Flags().Set("filename", "../../../examples/guestbook/frontend-service.json")
 	cmd.Run(cmd, []string{})
 
 	// Names should come from the REST response, NOT the files
-	if buf.String() != "rc1\nbaz\n" {
+	if buf.String() != "replicationcontrollers/rc1\nservices/baz\n" {
 		t.Errorf("unexpected output: %s", buf.String())
 	}
 }
@@ -111,11 +121,11 @@ func TestCreateDirectory(t *testing.T) {
 	tf.Namespace = "test"
 	buf := bytes.NewBuffer([]byte{})
 
-	cmd := f.NewCmdCreate(buf)
+	cmd := NewCmdCreate(f, buf)
 	cmd.Flags().Set("filename", "../../../examples/guestbook")
 	cmd.Run(cmd, []string{})
 
-	if buf.String() != "name\nbaz\nname\nbaz\nname\nbaz\n" {
+	if buf.String() != "replicationcontrollers/name\nservices/baz\nreplicationcontrollers/name\nservices/baz\nreplicationcontrollers/name\nservices/baz\n" {
 		t.Errorf("unexpected output: %s", buf.String())
 	}
 }

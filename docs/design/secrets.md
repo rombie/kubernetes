@@ -21,7 +21,7 @@ Goals of this design:
 ## Constraints and Assumptions
 
 *  This design does not prescribe a method for storing secrets; storage of secrets should be
-   pluggable to accomodate different use-cases
+   pluggable to accommodate different use-cases
 *  Encryption of secret data and node security are orthogonal concerns
 *  It is assumed that node and master are secure and that compromising their security could also
    compromise secrets:
@@ -72,7 +72,7 @@ service would also consume the secrets associated with the MySQL service.
 
 ### Use-Case: Secrets associated with service accounts
 
-[Service Accounts](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/design/service_accounts.md) are proposed as a
+[Service Accounts](http://docs.k8s.io/design/service_accounts.md) are proposed as a
 mechanism to decouple capabilities and security contexts from individual human users.  A
 `ServiceAccount` contains references to some number of secrets.  A `Pod` can specify that it is
 associated with a `ServiceAccount`.  Secrets should have a `Type` field to allow the Kubelet and
@@ -236,7 +236,7 @@ memory overcommit on the node.
 
 #### Secret data on the node: isolation
 
-Every pod will have a [security context](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/design/security_context.md).
+Every pod will have a [security context](http://docs.k8s.io/design/security_context.md).
 Secret data on the node should be isolated according to the security context of the container.  The
 Kubelet volume plugin API will be changed so that a volume plugin receives the security context of
 a volume along with the volume spec.  This will allow volume plugins to implement setting the
@@ -248,7 +248,7 @@ Several proposals / upstream patches are notable as background for this proposal
 
 1.  [Docker vault proposal](https://github.com/docker/docker/issues/10310)
 2.  [Specification for image/container standardization based on volumes](https://github.com/docker/docker/issues/9277)
-3.  [Kubernetes service account proposal](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/design/service_accounts.md)
+3.  [Kubernetes service account proposal](http://docs.k8s.io/design/service_accounts.md)
 4.  [Secrets proposal for docker (1)](https://github.com/docker/docker/pull/6075)
 5.  [Secrets proposal for docker (2)](https://github.com/docker/docker/pull/6697)
 
@@ -277,7 +277,7 @@ type Secret struct {
     // representing the arbitrary (possibly non-string) data value here.
     Data map[string][]byte `json:"data,omitempty"`
 
-    // Used to facilitate programatic handling of secret data.
+    // Used to facilitate programmatic handling of secret data.
     Type SecretType `json:"type,omitempty"`
 }
 
@@ -375,7 +375,7 @@ a tmpfs file system of that size to store secret data.  Rough accounting of spec
 For use-cases where the Kubelet's behavior is affected by the secrets associated with a pod's
 `ServiceAccount`, the Kubelet will need to be changed.  For example, if secrets of type
 `docker-reg-auth` affect how the pod's images are pulled, the Kubelet will need to be changed
-to accomodate this.  Subsequent proposals can address this on a type-by-type basis.
+to accommodate this.  Subsequent proposals can address this on a type-by-type basis.
 
 ## Examples
 

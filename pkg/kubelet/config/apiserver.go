@@ -26,20 +26,17 @@ import (
 )
 
 // NewSourceApiserver creates a config source that watches and pulls from the apiserver.
-func NewSourceApiserver(client *client.Client, hostname string, updates chan<- interface{}) {
-	lw := cache.NewListWatchFromClient(client, "pods", api.NamespaceAll, fields.OneTermEqualSelector(getHostFieldLabel(client.APIVersion()), hostname))
+func NewSourceApiserver(c *client.Client, hostname string, updates chan<- interface{}) {
+	lw := cache.NewListWatchFromClient(c, "pods", api.NamespaceAll, fields.OneTermEqualSelector(client.PodHost, hostname))
 	newSourceApiserverFromLW(lw, updates)
 }
 
 // newSourceApiserverFromLW holds creates a config source that watches and pulls from the apiserver.
 func newSourceApiserverFromLW(lw cache.ListerWatcher, updates chan<- interface{}) {
 	send := func(objs []interface{}) {
-		var pods []api.Pod
+		var pods []*api.Pod
 		for _, o := range objs {
-			pod := o.(*api.Pod)
-			// Make a dummy self link so that references to this pod will work.
-			pod.SelfLink = "/api/v1beta1/pods/" + pod.Name
-			pods = append(pods, *pod)
+			pods = append(pods, o.(*api.Pod))
 		}
 		updates <- kubelet.PodUpdate{pods, kubelet.SET, kubelet.ApiserverSource}
 	}

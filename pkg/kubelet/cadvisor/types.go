@@ -17,6 +17,7 @@ limitations under the License.
 package cadvisor
 
 import (
+	"github.com/google/cadvisor/events"
 	cadvisorApi "github.com/google/cadvisor/info/v1"
 	cadvisorApiV2 "github.com/google/cadvisor/info/v2"
 )
@@ -25,8 +26,14 @@ import (
 type Interface interface {
 	DockerContainer(name string, req *cadvisorApi.ContainerInfoRequest) (cadvisorApi.ContainerInfo, error)
 	ContainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (*cadvisorApi.ContainerInfo, error)
+	SubcontainerInfo(name string, req *cadvisorApi.ContainerInfoRequest) (map[string]*cadvisorApi.ContainerInfo, error)
 	MachineInfo() (*cadvisorApi.MachineInfo, error)
+
+	VersionInfo() (*cadvisorApi.VersionInfo, error)
 
 	// Returns usage information about the filesystem holding Docker images.
 	DockerImagesFsInfo() (cadvisorApiV2.FsInfo, error)
+
+	// Get past events that have been detected and that fit the request.
+	GetPastEvents(request *events.Request) ([]*cadvisorApi.Event, error)
 }

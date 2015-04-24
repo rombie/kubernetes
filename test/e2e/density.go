@@ -18,159 +18,29 @@ package e2e
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/cache"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/controller/framework"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/wait"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/watch"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
 
-// Delete a Replication Controller and all pods it spawned
-func DeleteRC(c *client.Client, ns, name string) error {
-	rc, err := c.ReplicationControllers(ns).Get(name)
-	if err != nil {
-		return fmt.Errorf("Failed to find replication controller %s in namespace %s: %v", name, ns, err)
-	}
-
-	rc.Spec.Replicas = 0
-
-	if _, err := c.ReplicationControllers(ns).Update(rc); err != nil {
-		return fmt.Errorf("Failed to resize replication controller %s to zero: %v", name, err)
-	}
-
-	if err := wait.Poll(time.Second, time.Minute*20, client.ControllerHasDesiredReplicas(c, rc)); err != nil {
-		return fmt.Errorf("Error waiting for replication controller %s replicas to reach 0: %v", name, err)
-	}
-
-	// Delete the replication controller.
-	if err := c.ReplicationControllers(ns).Delete(name); err != nil {
-		return fmt.Errorf("Failed to delete replication controller %s: %v", name, err)
-	}
-	return nil
-}
-
-// Launch a Replication Controller and wait for all pods it spawns
-// to become running
-func RunRC(c *client.Client, name string, ns, image string, replicas int) {
-	defer GinkgoRecover()
-
-	var last int
-	current := 0
-	same := 0
-
-	defer func() {
-		By("Cleaning up the replication controller")
-		err := DeleteRC(c, ns, name)
-		Expect(err).NotTo(HaveOccurred())
-	}()
-
-	By(fmt.Sprintf("Creating replication controller %s", name))
-	_, err := c.ReplicationControllers(ns).Create(&api.ReplicationController{
-		ObjectMeta: api.ObjectMeta{
-			Name: name,
-		},
-		Spec: api.ReplicationControllerSpec{
-			Replicas: replicas,
-			Selector: map[string]string{
-				"name": name,
-			},
-			Template: &api.PodTemplateSpec{
-				ObjectMeta: api.ObjectMeta{
-					Labels: map[string]string{"name": name},
-				},
-				Spec: api.PodSpec{
-					Containers: []api.Container{
-						{
-							Name:  name,
-							Image: image,
-							Ports: []api.ContainerPort{{ContainerPort: 80}},
-						},
-					},
-				},
-			},
-		},
-	})
-	Expect(err).NotTo(HaveOccurred())
-
-	By(fmt.Sprintf("Making sure all %d replicas exist", replicas))
-	label := labels.SelectorFromSet(labels.Set(map[string]string{"name": name}))
-	pods, err := c.Pods(ns).List(label)
-	Expect(err).NotTo(HaveOccurred())
-	current = len(pods.Items)
-	failCount := 5
-	for same < failCount && current < replicas {
-		Logf("Controller %s: Found %d pods out of %d", name, current, replicas)
-		if last < current {
-			same = 0
-		} else if last == current {
-			same++
-		} else if current < last {
-			Failf("Controller %s: Number of submitted pods dropped from %d to %d", last, current)
-		}
-
-		if same >= failCount {
-			Logf("No pods submitted for the last %d checks", failCount)
-		}
-
-		last = current
-		time.Sleep(5 * time.Second)
-		pods, err = c.Pods(ns).List(label)
-		Expect(err).NotTo(HaveOccurred())
-		current = len(pods.Items)
-	}
-	Expect(current).To(Equal(replicas))
-	Logf("Controller %s: Found %d pods out of %d", name, current, replicas)
-
-	By("Waiting for each pod to be running")
-	same = 0
-	last = 0
-	failCount = 6
-	unknown := 0
-	pending := 0
-	current = 0
-	for same < failCount && current < replicas {
-		current = 0
-		pending = 0
-		unknown = 0
-		time.Sleep(10 * time.Second)
-		for _, pod := range pods.Items {
-			p, err := c.Pods(ns).Get(pod.Name)
-			Expect(err).NotTo(HaveOccurred())
-			if p.Status.Phase == api.PodRunning {
-				current++
-			} else if p.Status.Phase == api.PodPending {
-				pending++
-			} else if p.Status.Phase == api.PodUnknown {
-				unknown++
-			}
-		}
-		Logf("Pod States: %d running, %d pending, %d unknown ", current, pending, unknown)
-		if last < current {
-			same = 0
-		} else if last == current {
-			same++
-		} else if current < last {
-			Failf("Number of running pods dropped from %d to %d", last, current)
-		}
-		if same >= failCount {
-			Logf("No pods started for the last %d checks", failCount)
-		}
-		last = current
-	}
-	Expect(current).To(Equal(replicas))
-}
-
-// This test suite can take a long time to run, so by default it is disabled
-// by being marked as Pending.  To enable this suite, remove the P from the
-// front of PDescribe (PDescribe->Describe) and then all tests will
-// be available
-var _ = PDescribe("Density", func() {
+// This test suite can take a long time to run, so by default it is added to
+// the ginkgo.skip list (see driver.go).
+// To run this suite you must explicitly ask for it by setting the
+// -t/--test flag or ginkgo.focus flag.
+var _ = Describe("Density", func() {
 	var c *client.Client
 	var minionCount int
 	var RCName string
@@ -180,7 +50,7 @@ var _ = PDescribe("Density", func() {
 		var err error
 		c, err = loadClient()
 		expectNoError(err)
-		minions, err := c.Nodes().List()
+		minions, err := c.Nodes().List(labels.Everything(), fields.Everything())
 		expectNoError(err)
 		minionCount = len(minions.Items)
 		Expect(minionCount).NotTo(BeZero())
@@ -194,28 +64,149 @@ var _ = PDescribe("Density", func() {
 		// during the test so clean it up here
 		rc, err := c.ReplicationControllers(ns).Get(RCName)
 		if err == nil && rc.Spec.Replicas != 0 {
-			DeleteRC(c, ns, RCName)
+			By("Cleaning up the replication controller")
+			err := DeleteRC(c, ns, RCName)
+			expectNoError(err)
+		}
+
+		// Clean up the namespace if a non-default one was used
+		if ns != api.NamespaceDefault {
+			By("Cleaning up the namespace")
+			err := c.Namespaces().Delete(ns)
+			expectNoError(err)
 		}
 	})
 
-	It("should allow starting 100 pods per node", func() {
-		RCName = "my-hostname-density100-" + string(util.NewUUID())
-		RunRC(c, RCName, ns, "dockerfile/nginx", 100*minionCount)
-	})
+	// Tests with "Skipped" substring in their name will be skipped when running
+	// e2e test suite without --ginkgo.focus & --ginkgo.skip flags.
+	type Density struct {
+		skip          bool
+		podsPerMinion int
+	}
 
-	It("should have master components that can handle many short-lived pods", func() {
-		threads := 5
-		var wg sync.WaitGroup
-		wg.Add(threads)
-		for i := 0; i < threads; i++ {
-			go func() {
-				defer wg.Done()
-				for i := 0; i < 10; i++ {
-					name := "my-hostname-thrash-" + string(util.NewUUID())
-					RunRC(c, name, ns, "kubernetes/pause", 10*minionCount)
+	densityTests := []Density{
+		// This test should always run, even if larger densities are skipped.
+		{podsPerMinion: 3, skip: false},
+		{podsPerMinion: 30, skip: false},
+		// More than 30 pods per node is outside our v1.0 goals.
+		// We might want to enable those tests in the future.
+		{podsPerMinion: 50, skip: true},
+		{podsPerMinion: 100, skip: true},
+	}
+
+	for _, testArg := range densityTests {
+		name := fmt.Sprintf("should allow starting %d pods per node", testArg.podsPerMinion)
+		if testArg.podsPerMinion <= 30 {
+			name = "[Performance suite] " + name
+		}
+		if testArg.skip {
+			name = "[Skipped] " + name
+		}
+		itArg := testArg
+		It(name, func() {
+			uuid := string(util.NewUUID())
+			totalPods := itArg.podsPerMinion * minionCount
+			nameStr := strconv.Itoa(totalPods) + "-" + uuid
+			ns = "e2e-density" + nameStr
+			RCName = "my-hostname-density" + nameStr
+
+			// Create a listener for events
+			events := make([](*api.Event), 0)
+			_, controller := framework.NewInformer(
+				&cache.ListWatch{
+					ListFunc: func() (runtime.Object, error) {
+						return c.Events(ns).List(labels.Everything(), fields.Everything())
+					},
+					WatchFunc: func(rv string) (watch.Interface, error) {
+						return c.Events(ns).Watch(labels.Everything(), fields.Everything(), rv)
+					},
+				},
+				&api.Event{},
+				time.Second*10,
+				framework.ResourceEventHandlerFuncs{
+					AddFunc: func(obj interface{}) {
+						events = append(events, obj.(*api.Event))
+					},
+				},
+			)
+			stop := make(chan struct{})
+			go controller.Run(stop)
+
+			// Start the replication controller
+			expectNoError(RunRC(c, RCName, ns, "gcr.io/google_containers/pause:go", totalPods))
+
+			By("Waiting for all events to be recorded")
+			last := -1
+			current := len(events)
+			timeout := 10 * time.Minute
+			for start := time.Now(); last < current && time.Since(start) < timeout; time.Sleep(10 * time.Second) {
+				last = current
+				current = len(events)
+			}
+			close(stop)
+
+			if current != last {
+				Logf("Warning: Not all events were recorded after waiting %.2f minutes", timeout.Minutes())
+			}
+			Logf("Found %d events", current)
+
+			// Verify there were no pod killings or failures
+			By("Verifying there were no pod killings or failures")
+			for _, e := range events {
+				for _, s := range []string{"kill", "fail"} {
+					Expect(e.Reason).NotTo(ContainSubstring(s), "event:' %s', reason: '%s', message: '%s', field path: '%s'", e, e.ObjectMeta.Name, e.Message, e.InvolvedObject.FieldPath)
 				}
-			}()
+			}
+		})
+	}
+
+	type Scalability struct {
+		skip          bool
+		totalPods     int
+		podsPerMinion int
+		rcsPerThread  int
+	}
+
+	scalabilityTests := []Scalability{
+		{totalPods: 500, podsPerMinion: 10, rcsPerThread: 5, skip: true},
+		{totalPods: 500, podsPerMinion: 10, rcsPerThread: 25, skip: true},
+	}
+
+	for _, testArg := range scalabilityTests {
+		// # of threads calibrate to totalPods
+		threads := (testArg.totalPods / (testArg.podsPerMinion * testArg.rcsPerThread))
+
+		name := fmt.Sprintf(
+			"should be able to launch %v pods, %v per minion, in %v rcs/thread.",
+			testArg.totalPods, testArg.podsPerMinion, testArg.rcsPerThread)
+		if testArg.skip {
+			name = "[Skipped] " + name
 		}
-		wg.Wait()
-	})
+
+		itArg := testArg
+		It(name, func() {
+			podsLaunched := 0
+			var wg sync.WaitGroup
+			wg.Add(threads)
+
+			// Create queue of pending requests on the api server.
+			for i := 0; i < threads; i++ {
+				go func() {
+					defer wg.Done()
+					for i := 0; i < itArg.rcsPerThread; i++ {
+						name := "my-short-lived-pod" + string(util.NewUUID())
+						n := itArg.podsPerMinion * minionCount
+						expectNoError(RunRC(c, name, ns, "gcr.io/google_containers/pause:go", n))
+						podsLaunched += n
+						Logf("Launched %v pods so far...", podsLaunched)
+						err := DeleteRC(c, ns, name)
+						expectNoError(err)
+					}
+				}()
+			}
+			// Wait for all the pods from all the RC's to return.
+			wg.Wait()
+			Logf("%v pods out of %v launched", podsLaunched, itArg.totalPods)
+		})
+	}
 })

@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/cadvisor"
+	kubecontainer "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/container"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/dockertools"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/network"
 	docker "github.com/fsouza/go-dockerclient"
@@ -73,12 +74,20 @@ func (d *testDocker) InspectContainer(id string) (*docker.Container, error) {
 func TestRunOnce(t *testing.T) {
 	cadvisor := &cadvisor.Mock{}
 	cadvisor.On("MachineInfo").Return(&cadvisorApi.MachineInfo{}, nil)
+
+	podManager, _ := newFakePodManager()
+
 	kb := &Kubelet{
-		rootDirectory: "/tmp/kubelet",
-		recorder:      &record.FakeRecorder{},
-		cadvisor:      cadvisor,
-		nodeLister:    testNodeLister{},
-		statusManager: newStatusManager(nil),
+		rootDirectory:       "/tmp/kubelet",
+		recorder:            &record.FakeRecorder{},
+		cadvisor:            cadvisor,
+		nodeLister:          testNodeLister{},
+		statusManager:       newStatusManager(nil),
+		containerRefManager: kubecontainer.NewRefManager(),
+		readinessManager:    kubecontainer.NewReadinessManager(),
+		podManager:          podManager,
+		os:                  FakeOS{},
+		volumeManager:       newVolumeManager(),
 	}
 
 	kb.networkPlugin, _ = network.InitNetworkPlugin([]network.NetworkPlugin{}, "", network.NewFakeHost(nil))
@@ -137,8 +146,18 @@ func TestRunOnce(t *testing.T) {
 		},
 		t: t,
 	}
-	kb.dockerPuller = &dockertools.FakeDockerPuller{}
-	results, err := kb.runOnce([]api.Pod{
+
+	kb.containerManager = dockertools.NewDockerManager(
+		kb.dockerClient,
+		kb.recorder,
+		kb.readinessManager,
+		kb.containerRefManager,
+		dockertools.PodInfraContainerImage,
+		0,
+		0)
+	kb.containerManager.Puller = &dockertools.FakeDockerPuller{}
+
+	pods := []*api.Pod{
 		{
 			ObjectMeta: api.ObjectMeta{
 				UID:       "12345678",
@@ -151,7 +170,9 @@ func TestRunOnce(t *testing.T) {
 				},
 			},
 		},
-	}, time.Millisecond)
+	}
+	podManager.SetPods(pods)
+	results, err := kb.runOnce(pods, time.Millisecond)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}

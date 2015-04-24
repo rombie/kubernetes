@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
 	"github.com/golang/glog"
 )
@@ -49,18 +50,23 @@ func (plugin *nfsPlugin) Name() string {
 	return nfsPluginName
 }
 
-func (plugin *nfsPlugin) CanSupport(spec *api.Volume) bool {
-	if spec.VolumeSource.NFS != nil {
-		return true
-	}
-	return false
+func (plugin *nfsPlugin) CanSupport(spec *volume.Spec) bool {
+	return spec.VolumeSource.NFS != nil
 }
 
-func (plugin *nfsPlugin) NewBuilder(spec *api.Volume, podRef *api.ObjectReference) (volume.Builder, error) {
+func (plugin *nfsPlugin) GetAccessModes() []api.AccessModeType {
+	return []api.AccessModeType{
+		api.ReadWriteOnce,
+		api.ReadOnlyMany,
+		api.ReadWriteMany,
+	}
+}
+
+func (plugin *nfsPlugin) NewBuilder(spec *volume.Spec, podRef *api.ObjectReference, _ volume.VolumeOptions) (volume.Builder, error) {
 	return plugin.newBuilderInternal(spec, podRef, plugin.mounter)
 }
 
-func (plugin *nfsPlugin) newBuilderInternal(spec *api.Volume, podRef *api.ObjectReference, mounter nfsMountInterface) (volume.Builder, error) {
+func (plugin *nfsPlugin) newBuilderInternal(spec *volume.Spec, podRef *api.ObjectReference, mounter nfsMountInterface) (volume.Builder, error) {
 	return &nfs{
 		volName:    spec.Name,
 		server:     spec.VolumeSource.NFS.Server,
@@ -146,7 +152,7 @@ func (nfsVolume *nfs) SetUpAt(dir string) error {
 
 func (nfsVolume *nfs) GetPath() string {
 	name := nfsPluginName
-	return nfsVolume.plugin.host.GetPodVolumeDir(nfsVolume.podRef.UID, volume.EscapePluginName(name), nfsVolume.volName)
+	return nfsVolume.plugin.host.GetPodVolumeDir(nfsVolume.podRef.UID, util.EscapeQualifiedNameForDisk(name), nfsVolume.volName)
 }
 
 func (nfsVolume *nfs) TearDown() error {

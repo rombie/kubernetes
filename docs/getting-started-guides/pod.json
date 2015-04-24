@@ -8,7 +8,7 @@
       "id": "php",
       "containers": [{
         "name": "nginx",
-        "image": "dockerfile/nginx",
+        "image": "nginx",
         "ports": [{
           "containerPort": 80,
           "hostPort": 8081
@@ -18,8 +18,8 @@
           "type": "http",
           "initialDelaySeconds": 30,
           "httpGet": {
-            "path": "/index.html",
-            "port": "8081"
+            "path": "/",
+            "port": "80"
           }
         }
       }]

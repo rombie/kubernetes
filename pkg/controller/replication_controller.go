@@ -17,7 +17,9 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -25,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/errors"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/validation"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -55,10 +58,12 @@ type PodControlInterface interface {
 // RealPodControl is the default implementation of PodControllerInterface.
 type RealPodControl struct {
 	kubeClient client.Interface
+	recorder   record.EventRecorder
 }
 
 // Time period of main replication controller sync loop
 const DefaultSyncPeriod = 5 * time.Second
+const CreatedByAnnotation = "kubernetes.io/created-by"
 
 func (r RealPodControl) createReplica(namespace string, controller api.ReplicationController) {
 	desiredLabels := make(labels.Set)
@@ -69,6 +74,20 @@ func (r RealPodControl) createReplica(namespace string, controller api.Replicati
 	for k, v := range controller.Spec.Template.Annotations {
 		desiredAnnotations[k] = v
 	}
+
+	createdByRef, err := api.GetReference(&controller)
+	if err != nil {
+		util.HandleError(fmt.Errorf("unable to get controller reference: %v", err))
+		return
+	}
+
+	createdByRefJson, err := json.Marshal(createdByRef)
+	if err != nil {
+		util.HandleError(fmt.Errorf("unable to serialize controller reference: %v", err))
+		return
+	}
+
+	desiredAnnotations[CreatedByAnnotation] = string(createdByRefJson)
 
 	// use the dash (if the name isn't too long) to make the pod name a bit prettier
 	prefix := fmt.Sprintf("%s-", controller.Name)
@@ -92,6 +111,7 @@ func (r RealPodControl) createReplica(namespace string, controller api.Replicati
 		return
 	}
 	if _, err := r.kubeClient.Pods(namespace).Create(pod); err != nil {
+		r.recorder.Eventf(&controller, "failedCreate", "Error creating: %v", err)
 		util.HandleError(fmt.Errorf("unable to create pod replica: %v", err))
 	}
 }
@@ -102,12 +122,17 @@ func (r RealPodControl) deletePod(namespace, podID string) error {
 
 // NewReplicationManager creates a new ReplicationManager.
 func NewReplicationManager(kubeClient client.Interface) *ReplicationManager {
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartRecordingToSink(kubeClient.Events(""))
+
 	rm := &ReplicationManager{
 		kubeClient: kubeClient,
 		podControl: RealPodControl{
 			kubeClient: kubeClient,
+			recorder:   eventBroadcaster.NewRecorder(api.EventSource{Component: "replication-controller"}),
 		},
 	}
+
 	rm.syncHandler = rm.syncReplicationController
 	return rm
 }
@@ -155,7 +180,7 @@ func (rm *ReplicationManager) watchControllers(resourceVersion *string) {
 			if !ok {
 				if status, ok := event.Object.(*api.Status); ok {
 					if status.Status == api.StatusFailure {
-						glog.Errorf("failed to watch: %v", status)
+						glog.Errorf("Failed to watch: %v", status)
 						// Clear resource version here, as above, this won't hurt consistency, but we
 						// should consider introspecting more carefully here. (or make the apiserver smarter)
 						// "why not both?"
@@ -170,7 +195,7 @@ func (rm *ReplicationManager) watchControllers(resourceVersion *string) {
 			*resourceVersion = rc.ResourceVersion
 			// Sync even if this is a deletion event, to ensure that we leave
 			// it in the desired state.
-			glog.V(4).Infof("About to sync from watch: %v", rc.Name)
+			glog.V(4).Infof("About to sync from watch: %q", rc.Name)
 			if err := rm.syncHandler(*rc); err != nil {
 				util.HandleError(fmt.Errorf("unexpected sync error: %v", err))
 			}
@@ -178,32 +203,54 @@ func (rm *ReplicationManager) watchControllers(resourceVersion *string) {
 	}
 }
 
-// Helper function. Also used in pkg/registry/controller, for now.
-func FilterActivePods(pods []api.Pod) []api.Pod {
-	var result []api.Pod
-	for _, value := range pods {
-		if api.PodSucceeded != value.Status.Phase &&
-			api.PodFailed != value.Status.Phase {
-			result = append(result, value)
+// filterActivePods returns pods that have not terminated.
+func filterActivePods(pods []api.Pod) []*api.Pod {
+	var result []*api.Pod
+	for i := range pods {
+		if api.PodSucceeded != pods[i].Status.Phase &&
+			api.PodFailed != pods[i].Status.Phase {
+			result = append(result, &pods[i])
 		}
 	}
 	return result
 }
 
+type activePods []*api.Pod
+
+func (s activePods) Len() int      { return len(s) }
+func (s activePods) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+
+func (s activePods) Less(i, j int) bool {
+	// Unassigned < assigned
+	if s[i].Spec.Host == "" && s[j].Spec.Host != "" {
+		return true
+	}
+	// PodPending < PodUnknown < PodRunning
+	m := map[api.PodPhase]int{api.PodPending: 0, api.PodUnknown: 1, api.PodRunning: 2}
+	if m[s[i].Status.Phase] != m[s[j].Status.Phase] {
+		return m[s[i].Status.Phase] < m[s[j].Status.Phase]
+	}
+	// Not ready < ready
+	if !api.IsPodReady(s[i]) && api.IsPodReady(s[j]) {
+		return true
+	}
+	return false
+}
+
 func (rm *ReplicationManager) syncReplicationController(controller api.ReplicationController) error {
 	s := labels.Set(controller.Spec.Selector).AsSelector()
-	podList, err := rm.kubeClient.Pods(controller.Namespace).List(s)
+	podList, err := rm.kubeClient.Pods(controller.Namespace).List(s, fields.Everything())
 	if err != nil {
 		return err
 	}
-	filteredList := FilterActivePods(podList.Items)
-	activePods := len(filteredList)
-	diff := activePods - controller.Spec.Replicas
+	filteredList := filterActivePods(podList.Items)
+	numActivePods := len(filteredList)
+	diff := numActivePods - controller.Spec.Replicas
 	if diff < 0 {
 		diff *= -1
 		wait := sync.WaitGroup{}
 		wait.Add(diff)
-		glog.V(2).Infof("Too few \"%s\" replicas, creating %d\n", controller.Name, diff)
+		glog.V(2).Infof("Too few %q replicas, creating %d", controller.Name, diff)
 		for i := 0; i < diff; i++ {
 			go func() {
 				defer wait.Done()
@@ -212,7 +259,12 @@ func (rm *ReplicationManager) syncReplicationController(controller api.Replicati
 		}
 		wait.Wait()
 	} else if diff > 0 {
-		glog.V(2).Infof("Too many \"%s\" replicas, deleting %d\n", controller.Name, diff)
+		glog.V(2).Infof("Too many %q replicas, deleting %d", controller.Name, diff)
+		// Sort the pods in the order such that not-ready < ready, unscheduled
+		// < scheduled, and pending < running. This ensures that we delete pods
+		// in the earlier stages whenever possible.
+		sort.Sort(activePods(filteredList))
+
 		wait := sync.WaitGroup{}
 		wait.Add(diff)
 		for i := 0; i < diff; i++ {
@@ -223,8 +275,8 @@ func (rm *ReplicationManager) syncReplicationController(controller api.Replicati
 		}
 		wait.Wait()
 	}
-	if controller.Status.Replicas != activePods {
-		controller.Status.Replicas = activePods
+	if controller.Status.Replicas != numActivePods {
+		controller.Status.Replicas = numActivePods
 		_, err = rm.kubeClient.ReplicationControllers(controller.Namespace).Update(&controller)
 		if err != nil {
 			return err

@@ -17,19 +17,20 @@ limitations under the License.
 package kubelet
 
 import (
+	"fmt"
 	"reflect"
 	"sync"
-	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	kubecontainer "github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet/container"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
 )
 
 type podStatusSyncRequest struct {
-	podFullName string
-	status      api.PodStatus
+	pod    *api.Pod
+	status api.PodStatus
 }
 
 // Updates pod statuses in apiserver. Writes only when new status has changed.
@@ -51,8 +52,14 @@ func newStatusManager(kubeClient client.Interface) *statusManager {
 }
 
 func (s *statusManager) Start() {
-	// We can run SyncBatch() often because it will block until we have some updates to send.
-	go util.Forever(s.SyncBatch, 0)
+	// syncBatch blocks when no updates are available, we can run it in a tight loop.
+	glog.Info("Starting to sync pod status with apiserver")
+	go util.Forever(func() {
+		err := s.syncBatch()
+		if err != nil {
+			glog.Warningf("Failed to updated pod status: %v", err)
+		}
+	}, 0)
 }
 
 func (s *statusManager) GetPodStatus(podFullName string) (api.PodStatus, bool) {
@@ -62,13 +69,14 @@ func (s *statusManager) GetPodStatus(podFullName string) (api.PodStatus, bool) {
 	return status, ok
 }
 
-func (s *statusManager) SetPodStatus(podFullName string, status api.PodStatus) {
+func (s *statusManager) SetPodStatus(pod *api.Pod, status api.PodStatus) {
+	podFullName := kubecontainer.GetPodFullName(pod)
 	s.podStatusesLock.Lock()
 	defer s.podStatusesLock.Unlock()
 	oldStatus, found := s.podStatuses[podFullName]
 	if !found || !reflect.DeepEqual(oldStatus, status) {
 		s.podStatuses[podFullName] = status
-		s.podStatusChannel <- podStatusSyncRequest{podFullName, status}
+		s.podStatusChannel <- podStatusSyncRequest{pod, status}
 	} else {
 		glog.V(3).Infof("Ignoring same pod status for %s - old: %s new: %s", podFullName, oldStatus, status)
 	}
@@ -92,31 +100,32 @@ func (s *statusManager) RemoveOrphanedStatuses(podFullNames map[string]bool) {
 	}
 }
 
-// SyncBatch syncs pods statuses with the apiserver. It will loop until channel
-// s.podStatusChannel is empty for at least 1s.
-func (s *statusManager) SyncBatch() {
-	for {
-		select {
-		case syncRequest := <-s.podStatusChannel:
-			podFullName := syncRequest.podFullName
-			status := syncRequest.status
-			glog.V(3).Infof("Syncing status for %s", podFullName)
-			name, namespace, err := ParsePodFullName(podFullName)
-			if err != nil {
-				glog.Warningf("Cannot parse pod full name %q: %s", podFullName, err)
-			}
-			_, err = s.kubeClient.Pods(namespace).UpdateStatus(name, &status)
-			if err != nil {
-				// We failed to update status. In order to make sure we retry next time
-				// we delete cached value. This may result in an additional update, but
-				// this is ok.
-				s.DeletePodStatus(podFullName)
-				glog.Warningf("Error updating status for pod %q: %v", name, err)
-			} else {
-				glog.V(3).Infof("Status for pod %q updated successfully", name)
-			}
-		case <-time.After(1 * time.Second):
-			return
+// syncBatch syncs pods statuses with the apiserver.
+func (s *statusManager) syncBatch() error {
+	syncRequest := <-s.podStatusChannel
+	pod := syncRequest.pod
+	podFullName := kubecontainer.GetPodFullName(pod)
+	status := syncRequest.status
+
+	var err error
+	statusPod := &api.Pod{
+		ObjectMeta: pod.ObjectMeta,
+	}
+	// TODO: make me easier to express from client code
+	statusPod, err = s.kubeClient.Pods(statusPod.Namespace).Get(statusPod.Name)
+	if err == nil {
+		statusPod.Status = status
+		_, err = s.kubeClient.Pods(pod.Namespace).UpdateStatus(statusPod)
+		// TODO: handle conflict as a retry, make that easier too.
+		if err == nil {
+			glog.V(3).Infof("Status for pod %q updated successfully", pod.Name)
+			return nil
 		}
 	}
+
+	// We failed to update status. In order to make sure we retry next time
+	// we delete cached value. This may result in an additional update, but
+	// this is ok.
+	s.DeletePodStatus(podFullName)
+	return fmt.Errorf("error updating status for pod %q: %v", pod.Name, err)
 }

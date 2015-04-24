@@ -1,6 +1,6 @@
 # Kubernetes deployed on multiple ubuntu nodes
 
-This document describes how to deploy kubernetes on multiple ubuntu nodes, including 1 master node and 3 minion nodes, and people uses this approach can scale to **any number of minion nodes** by changing some settings with ease. Although there exists saltstack based ubuntu k8s installation ,  it may be tedious and hard for a guy that knows little about saltstack but want to build a really distributed k8s cluster. This approach is inspired by [k8s deploy on a single node](https://github.com/GoogleCloudPlatform/kubernetes/blob/master/docs/getting-started-guides/ubuntu_single_node.md).
+This document describes how to deploy kubernetes on multiple ubuntu nodes, including 1 master node and 3 minion nodes, and people uses this approach can scale to **any number of minion nodes** by changing some settings with ease. Although there exists saltstack based ubuntu k8s installation ,  it may be tedious and hard for a guy that knows little about saltstack but want to build a really distributed k8s cluster. This approach is inspired by [k8s deploy on a single node](http://docs.k8s.io/getting-started-guides/ubuntu_single_node.md).
 
 [Cloud team from ZJU](https://github.com/ZJU-SEL) will keep updating this work.
 
@@ -114,8 +114,10 @@ If you want a node acts as **both running the master and minion**, please choose
 2. On any node:
 	
 	`$ /opt/bin/etcdctl mk /coreos.com/network/config '{"Network":"10.0.0.0/16"}'`
+
+	Note the `10.0.0.0/16` is a virtual network address. It has nothing to do with master and minions IP addresses assigned by the cloud provider. In other words even if your master and minions use address from another network (e.g. 172.16.0x) you can still use `10.0.0.0/16` for your virtual network.
 	
-	> You can use the below command on another node to comfirm if the network setting is correct.
+	> You can use the below command on another node to confirm if the network setting is correct.
 	
 	> `$ /opt/bin/etcdctl get /coreos.com/network/config`
 	

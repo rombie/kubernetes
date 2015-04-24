@@ -41,6 +41,7 @@ import (
 
 var globalHousekeepingInterval = flag.Duration("global_housekeeping_interval", 1*time.Minute, "Interval between global housekeepings")
 var logCadvisorUsage = flag.Bool("log_cadvisor_usage", false, "Whether to log the usage of the cAdvisor container")
+var enableLoadReader = flag.Bool("enable_load_reader", false, "Whether to enable cpu load reader")
 
 // The Manager interface defines operations for starting a manager and getting
 // container and machine information.
@@ -83,10 +84,12 @@ type Manager interface {
 	GetFsInfo(label string) ([]v2.FsInfo, error)
 
 	// Get events streamed through passedChannel that fit the request.
-	WatchForEvents(request *events.Request, passedChannel chan *events.Event) error
+	WatchForEvents(request *events.Request) (*events.EventChannel, error)
 
 	// Get past events that have been detected and that fit the request.
-	GetPastEvents(request *events.Request) (events.EventSlice, error)
+	GetPastEvents(request *events.Request) ([]*info.Event, error)
+
+	CloseEventChannel(watch_id int)
 }
 
 // New takes a memory storage and returns a new manager.
@@ -173,8 +176,8 @@ type manager struct {
 
 // Start the container manager.
 func (self *manager) Start() error {
-	// TODO(rjnagal): Skip creating cpu load reader while we improve resource usage and accuracy.
-	if false {
+
+	if *enableLoadReader {
 		// Create cpu load reader.
 		cpuLoadReader, err := cpuload.New()
 		if err != nil {
@@ -271,7 +274,7 @@ func (self *manager) globalHousekeeping(quit chan error) {
 			// Log if housekeeping took too long.
 			duration := time.Since(start)
 			if duration >= longHousekeeping {
-				glog.V(1).Infof("Global Housekeeping(%d) took %s", t.Unix(), duration)
+				glog.V(3).Infof("Global Housekeeping(%d) took %s", t.Unix(), duration)
 			}
 		case <-quit:
 			// Quit if asked to do so.
@@ -658,22 +661,26 @@ func (m *manager) createContainer(containerName string) error {
 	}
 	glog.V(2).Infof("Added container: %q (aliases: %v, namespace: %q)", containerName, cont.info.Aliases, cont.info.Namespace)
 
-	contSpecs, err := cont.handler.GetSpec()
+	contSpec, err := cont.handler.GetSpec()
 	if err != nil {
 		return err
 	}
 
-	if contSpecs.CreationTime.After(m.startupTime) {
+	if contSpec.CreationTime.After(m.startupTime) {
 		contRef, err := cont.handler.ContainerReference()
 		if err != nil {
 			return err
 		}
 
-		newEvent := &events.Event{
+		newEvent := &info.Event{
 			ContainerName: contRef.Name,
-			EventData:     contSpecs,
-			Timestamp:     contSpecs.CreationTime,
-			EventType:     events.TypeContainerCreation,
+			Timestamp:     contSpec.CreationTime,
+			EventType:     info.EventContainerCreation,
+			EventData: info.EventData{
+				Created: &info.CreatedEventData{
+					Spec: contSpec,
+				},
+			},
 		}
 		err = m.eventHandler.AddEvent(newEvent)
 		if err != nil {
@@ -721,10 +728,10 @@ func (m *manager) destroyContainer(containerName string) error {
 		return err
 	}
 
-	newEvent := &events.Event{
+	newEvent := &info.Event{
 		ContainerName: contRef.Name,
 		Timestamp:     time.Now(),
-		EventType:     events.TypeContainerDeletion,
+		EventType:     info.EventContainerDeletion,
 	}
 	err = m.eventHandler.AddEvent(newEvent)
 	if err != nil {
@@ -845,7 +852,7 @@ func (self *manager) watchForNewContainers(quit chan error) error {
 					err = self.destroyContainer(event.Name)
 				}
 				if err != nil {
-					glog.Warning("Failed to process watch event: %v", err)
+					glog.Warningf("Failed to process watch event: %v", err)
 				}
 			case <-quit:
 				// Stop processing events if asked to quit.
@@ -868,22 +875,36 @@ func (self *manager) watchForNewOoms() error {
 	if err != nil {
 		return err
 	}
-	err = oomLog.StreamOoms(outStream)
-	if err != nil {
-		return err
-	}
+	go oomLog.StreamOoms(outStream)
+
 	go func() {
 		for oomInstance := range outStream {
-			newEvent := &events.Event{
+			// Surface OOM and OOM kill events.
+			newEvent := &info.Event{
 				ContainerName: oomInstance.ContainerName,
 				Timestamp:     oomInstance.TimeOfDeath,
-				EventType:     events.TypeOom,
-				EventData:     oomInstance,
+				EventType:     info.EventOom,
 			}
-			glog.V(1).Infof("Created an oom event: %v", newEvent)
 			err := self.eventHandler.AddEvent(newEvent)
 			if err != nil {
-				glog.Errorf("Failed to add event %v, got error: %v", newEvent, err)
+				glog.Errorf("failed to add OOM event for %q: %v", oomInstance.ContainerName, err)
+			}
+			glog.V(3).Infof("Created an OOM event in container %q at %v", oomInstance.ContainerName, oomInstance.TimeOfDeath)
+
+			newEvent = &info.Event{
+				ContainerName: oomInstance.VictimContainerName,
+				Timestamp:     oomInstance.TimeOfDeath,
+				EventType:     info.EventOomKill,
+				EventData: info.EventData{
+					OomKill: &info.OomKillEventData{
+						Pid:         oomInstance.Pid,
+						ProcessName: oomInstance.ProcessName,
+					},
+				},
+			}
+			err = self.eventHandler.AddEvent(newEvent)
+			if err != nil {
+				glog.Errorf("failed to add OOM kill event for %q: %v", oomInstance.ContainerName, err)
 			}
 		}
 	}()
@@ -891,11 +912,16 @@ func (self *manager) watchForNewOoms() error {
 }
 
 // can be called by the api which will take events returned on the channel
-func (self *manager) WatchForEvents(request *events.Request, passedChannel chan *events.Event) error {
-	return self.eventHandler.WatchEvents(passedChannel, request)
+func (self *manager) WatchForEvents(request *events.Request) (*events.EventChannel, error) {
+	return self.eventHandler.WatchEvents(request)
 }
 
 // can be called by the api which will return all events satisfying the request
-func (self *manager) GetPastEvents(request *events.Request) (events.EventSlice, error) {
+func (self *manager) GetPastEvents(request *events.Request) ([]*info.Event, error) {
 	return self.eventHandler.GetEvents(request)
+}
+
+// called by the api when a client is no longer listening to the channel
+func (self *manager) CloseEventChannel(watch_id int) {
+	self.eventHandler.StopWatch(watch_id)
 }

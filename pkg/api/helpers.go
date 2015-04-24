@@ -21,6 +21,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/conversion"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 
 	"github.com/davecgh/go-spew/spew"
@@ -63,6 +65,12 @@ var Semantic = conversion.EqualitiesOrDie(
 	func(a, b util.Time) bool {
 		return a.UTC() == b.UTC()
 	},
+	func(a, b labels.Selector) bool {
+		return a.String() == b.String()
+	},
+	func(a, b fields.Selector) bool {
+		return a.String() == b.String()
+	},
 )
 
 var standardResources = util.NewStringSet(
@@ -71,7 +79,10 @@ var standardResources = util.NewStringSet(
 	string(ResourcePods),
 	string(ResourceQuotas),
 	string(ResourceServices),
-	string(ResourceReplicationControllers))
+	string(ResourceReplicationControllers),
+	string(ResourceSecrets),
+	string(ResourcePersistentVolumeClaims),
+	string(ResourceStorage))
 
 func IsStandardResourceName(str string) bool {
 	return standardResources.Has(str)
@@ -101,4 +112,21 @@ var standardFinalizers = util.NewStringSet(
 
 func IsStandardFinalizerName(str string) bool {
 	return standardFinalizers.Has(str)
+}
+
+// AddToNodeAddresses appends the NodeAddresses to the passed-by-pointer slice,
+// only if they do not already exist
+func AddToNodeAddresses(addresses *[]NodeAddress, addAddresses ...NodeAddress) {
+	for _, add := range addAddresses {
+		exists := false
+		for _, existing := range *addresses {
+			if existing.Address == add.Address && existing.Type == add.Type {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			*addresses = append(*addresses, add)
+		}
+	}
 }

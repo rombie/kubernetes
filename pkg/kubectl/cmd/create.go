@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl"
 	cmdutil "github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/cmd/util"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/kubectl/resource"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
@@ -38,7 +39,7 @@ $ kubectl create -f pod.json
 $ cat pod.json | kubectl create -f -`
 )
 
-func (f *Factory) NewCmdCreate(out io.Writer) *cobra.Command {
+func NewCmdCreate(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	var filenames util.StringList
 	cmd := &cobra.Command{
 		Use:     "create -f FILENAME",
@@ -46,15 +47,25 @@ func (f *Factory) NewCmdCreate(out io.Writer) *cobra.Command {
 		Long:    create_long,
 		Example: create_example,
 		Run: func(cmd *cobra.Command, args []string) {
-			err := RunCreate(f, out, cmd, filenames)
-			cmdutil.CheckErr(err)
+			cmdutil.CheckErr(ValidateArgs(cmd, args))
+			cmdutil.CheckErr(RunCreate(f, out, filenames))
 		},
 	}
-	cmd.Flags().VarP(&filenames, "filename", "f", "Filename, directory, or URL to file to use to create the resource")
+
+	usage := "Filename, directory, or URL to file to use to create the resource"
+	kubectl.AddJsonFilenameFlag(cmd, &filenames, usage)
+
 	return cmd
 }
 
-func RunCreate(f *Factory, out io.Writer, cmd *cobra.Command, filenames util.StringList) error {
+func ValidateArgs(cmd *cobra.Command, args []string) error {
+	if len(args) != 0 {
+		return cmdutil.UsageError(cmd, "Unexpected args: %v", args)
+	}
+	return nil
+}
+
+func RunCreate(f *cmdutil.Factory, out io.Writer, filenames util.StringList) error {
 	schema, err := f.Validator()
 	if err != nil {
 		return err
@@ -66,7 +77,7 @@ func RunCreate(f *Factory, out io.Writer, cmd *cobra.Command, filenames util.Str
 	}
 
 	mapper, typer := f.Object()
-	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand(cmd)).
+	r := resource.NewBuilder(mapper, typer, f.ClientMapperForCommand()).
 		ContinueOnError().
 		NamespaceParam(cmdNamespace).RequireNamespace().
 		FilenameParam(filenames...).
@@ -92,7 +103,7 @@ func RunCreate(f *Factory, out io.Writer, cmd *cobra.Command, filenames util.Str
 		}
 		count++
 		info.Refresh(obj, true)
-		fmt.Fprintf(out, "%s\n", info.Name)
+		fmt.Fprintf(out, "%s/%s\n", info.Mapping.Resource, info.Name)
 		return nil
 	})
 	if err != nil {

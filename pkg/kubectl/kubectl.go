@@ -25,8 +25,6 @@ import (
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
 )
 
-var apiVersionToUse = "v1beta1"
-
 const kubectlAnnotationPrefix = "kubectl.kubernetes.io/"
 
 type NamespaceInfo struct {
@@ -98,15 +96,19 @@ func (e ShortcutExpander) VersionAndKindForResource(resource string) (defaultVer
 // indeed a shortcut. Otherwise, will return resource unmodified.
 func expandResourceShortcut(resource string) string {
 	shortForms := map[string]string{
-		"po": "pods",
-		"rc": "replicationcontrollers",
-		// DEPRECATED: will be removed before 1.0
-		"se":     "services",
-		"svc":    "services",
-		"mi":     "minions",
+		// Please keep this alphabetized
+		"cs":     "componentstatuses",
 		"ev":     "events",
 		"limits": "limitRanges",
+		"mi":     "minions",
+		"po":     "pods",
+		"pv":     "persistentVolumes",
+		"pvc":    "persistentVolumeClaims",
 		"quota":  "resourceQuotas",
+		"rc":     "replicationcontrollers",
+		// DEPRECATED: will be removed before 1.0
+		"se":  "services",
+		"svc": "services",
 	}
 	if expanded, ok := shortForms[resource]; ok {
 		return expanded

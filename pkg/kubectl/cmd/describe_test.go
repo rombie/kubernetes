@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package cmd_test
+package cmd
 
 import (
 	"bytes"
@@ -37,7 +37,7 @@ func TestDescribeUnknownSchemaObject(t *testing.T) {
 	tf.Namespace = "non-default"
 	buf := bytes.NewBuffer([]byte{})
 
-	cmd := f.NewCmdDescribe(buf)
+	cmd := NewCmdDescribe(f, buf)
 	cmd.Run(cmd, []string{"type", "foo"})
 
 	if d.Name != "foo" || d.Namespace != "non-default" {

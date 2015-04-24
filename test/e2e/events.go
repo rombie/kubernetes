@@ -41,11 +41,6 @@ var _ = Describe("Events", func() {
 	})
 
 	It("should be sent by kubelets and the scheduler about pods scheduling and running", func() {
-		provider := testContext.provider
-		if len(provider) > 0 && provider != "gce" && provider != "gke" && provider != "aws" {
-			By(fmt.Sprintf("skipping TestKubeletSendsEvent on cloud provider %s", provider))
-			return
-		}
 
 		podClient := c.Pods(api.NamespaceDefault)
 
@@ -64,7 +59,7 @@ var _ = Describe("Events", func() {
 				Containers: []api.Container{
 					{
 						Name:  "p",
-						Image: "kubernetes/serve_hostname",
+						Image: "gcr.io/google_containers/serve_hostname:1.1",
 						Ports: []api.ContainerPort{{ContainerPort: 80}},
 					},
 				},
@@ -83,7 +78,7 @@ var _ = Describe("Events", func() {
 		expectNoError(waitForPodRunning(c, pod.Name))
 
 		By("verifying the pod is in kubernetes")
-		pods, err := podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})))
+		pods, err := podClient.List(labels.SelectorFromSet(labels.Set(map[string]string{"time": value})), fields.Everything())
 		Expect(len(pods.Items)).To(Equal(1))
 
 		By("retrieving the pod")

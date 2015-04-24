@@ -14,8 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# TODO: the zone isn't quite piped into all the right places...
-ZONE=${KUBE_AWS_ZONE:-us-west-2}
+ZONE=${KUBE_AWS_ZONE:-us-west-2a}
 MASTER_SIZE=${MASTER_SIZE:-t2.micro}
 MINION_SIZE=${MINION_SIZE:-t2.micro}
 NUM_MINIONS=${NUM_MINIONS:-4}
@@ -28,6 +27,7 @@ NUM_MINIONS=${NUM_MINIONS:-4}
 AWS_S3_REGION=${AWS_S3_REGION:-us-east-1}
 
 INSTANCE_PREFIX="${KUBE_AWS_INSTANCE_PREFIX:-kubernetes}"
+CLUSTER_ID=${INSTANCE_PREFIX}
 AWS_SSH_KEY=${AWS_SSH_KEY:-$HOME/.ssh/kube_aws_rsa}
 IAM_PROFILE_MASTER="kubernetes-master"
 IAM_PROFILE_MINION="kubernetes-minion"
@@ -42,6 +42,7 @@ MINION_IP_RANGES=($(eval echo "10.244.{1..${NUM_MINIONS}}.0/24"))
 MINION_SCOPES=""
 POLL_SLEEP_INTERVAL=3
 PORTAL_NET="10.0.0.0/16"
+MASTER_IP_RANGE="${MASTER_IP_RANGE:-10.246.0.0/24}"
 
 
 # When set to true, Docker Cache is enabled by default as part of the cluster bring up.

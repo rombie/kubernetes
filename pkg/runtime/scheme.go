@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"fmt"
+	"net/url"
 	"reflect"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/conversion"
@@ -34,6 +35,10 @@ type Scheme struct {
 
 // Function to convert a field selector to internal representation.
 type FieldLabelConversionFunc func(label, value string) (internalLabel, internalValue string, err error)
+
+func (self *Scheme) Raw() *conversion.Scheme {
+	return self.raw
+}
 
 // fromScope gets the input version, desired output version, and desired Scheme
 // from a conversion.Scope.
@@ -147,8 +152,9 @@ func (self *Scheme) rawExtensionToEmbeddedObject(in *RawExtension, out *Embedded
 }
 
 // runtimeObjectToRawExtensionArray takes a list of objects and encodes them as RawExtension in the output version
-// defined by the conversion.Scope. If objects must be encoded to different schema versions you should set them as
-// runtime.Unknown in the internal version instead.
+// defined by the conversion.Scope. If objects must be encoded to different schema versions than the default, you
+// should encode them yourself with runtime.Unknown, or convert the object prior to invoking conversion. Objects
+// outside of the current scheme must be added as runtime.Unknown.
 func (self *Scheme) runtimeObjectToRawExtensionArray(in *[]Object, out *[]RawExtension, s conversion.Scope) error {
 	src := *in
 	dest := make([]RawExtension, len(src))
@@ -160,7 +166,12 @@ func (self *Scheme) runtimeObjectToRawExtensionArray(in *[]Object, out *[]RawExt
 		case *Unknown:
 			dest[i].RawJSON = t.RawJSON
 		default:
-			data, err := scheme.EncodeToVersion(src[i], outVersion)
+			version := outVersion
+			// if the object exists
+			if inVersion, _, err := scheme.ObjectVersionAndKind(src[i]); err == nil && len(inVersion) != 0 {
+				version = inVersion
+			}
+			data, err := scheme.EncodeToVersion(src[i], version)
 			if err != nil {
 				return err
 			}
@@ -215,6 +226,16 @@ func NewScheme() *Scheme {
 		s.runtimeObjectToRawExtensionArray,
 		s.rawExtensionToRuntimeObjectArray,
 	); err != nil {
+		panic(err)
+	}
+	// Enable map[string][]string conversions by default
+	if err := s.raw.AddConversionFuncs(DefaultStringConversions...); err != nil {
+		panic(err)
+	}
+	if err := s.raw.RegisterInputDefaults(&map[string][]string{}, JSONKeyMapper, conversion.AllowDifferentFieldTypeNames|conversion.IgnoreMissingFields); err != nil {
+		panic(err)
+	}
+	if err := s.raw.RegisterInputDefaults(&url.Values{}, JSONKeyMapper, conversion.AllowDifferentFieldTypeNames|conversion.IgnoreMissingFields); err != nil {
 		panic(err)
 	}
 	return s
@@ -286,14 +307,20 @@ func (s *Scheme) AddConversionFuncs(conversionFuncs ...interface{}) error {
 	return s.raw.AddConversionFuncs(conversionFuncs...)
 }
 
+// Similar to AddConversionFuncs, but registers conversion functions that were
+// automatically generated.
+func (s *Scheme) AddGeneratedConversionFuncs(conversionFuncs ...interface{}) error {
+	return s.raw.AddGeneratedConversionFuncs(conversionFuncs...)
+}
+
 // AddFieldLabelConversionFunc adds a conversion function to convert field selectors
-// of the given api resource from the given version to internal version representation.
-func (s *Scheme) AddFieldLabelConversionFunc(version, apiResource string, conversionFunc FieldLabelConversionFunc) error {
+// of the given kind from the given version to internal version representation.
+func (s *Scheme) AddFieldLabelConversionFunc(version, kind string, conversionFunc FieldLabelConversionFunc) error {
 	if s.fieldLabelConversionFuncs[version] == nil {
 		s.fieldLabelConversionFuncs[version] = map[string]FieldLabelConversionFunc{}
 	}
 
-	s.fieldLabelConversionFuncs[version][apiResource] = conversionFunc
+	s.fieldLabelConversionFuncs[version][kind] = conversionFunc
 	return nil
 }
 
@@ -319,15 +346,15 @@ func (s *Scheme) Convert(in, out interface{}) error {
 	return s.raw.Convert(in, out)
 }
 
-// Converts the given field label and value for an apiResource field selector from
+// Converts the given field label and value for an kind field selector from
 // versioned representation to an unversioned one.
-func (s *Scheme) ConvertFieldLabel(version, apiResource, label, value string) (string, string, error) {
+func (s *Scheme) ConvertFieldLabel(version, kind, label, value string) (string, string, error) {
 	if s.fieldLabelConversionFuncs[version] == nil {
 		return "", "", fmt.Errorf("No conversion function found for version: %s", version)
 	}
-	conversionFunc, ok := s.fieldLabelConversionFuncs[version][apiResource]
+	conversionFunc, ok := s.fieldLabelConversionFuncs[version][kind]
 	if !ok {
-		return "", "", fmt.Errorf("No conversion function found for version %s and api resource %s", version, apiResource)
+		return "", "", fmt.Errorf("No conversion function found for version %s and kind %s", version, kind)
 	}
 	return conversionFunc(label, value)
 }

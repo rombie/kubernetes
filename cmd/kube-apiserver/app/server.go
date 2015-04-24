@@ -23,6 +23,9 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"os"
+	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -44,20 +47,23 @@ import (
 
 // APIServer runs a kubernetes api server.
 type APIServer struct {
-	WideOpenPort               int
-	Address                    util.IP
-	PublicAddressOverride      util.IP
+	InsecureBindAddress        util.IP
+	InsecurePort               int
+	BindAddress                util.IP
 	ReadOnlyPort               int
+	SecurePort                 int
+	ExternalHost               string
 	APIRate                    float32
 	APIBurst                   int
-	SecurePort                 int
 	TLSCertFile                string
 	TLSPrivateKeyFile          string
+	CertDirectory              string
 	APIPrefix                  string
 	StorageVersion             string
 	CloudProvider              string
 	CloudConfigFile            string
 	EventTTL                   time.Duration
+	ClientCAFile               string
 	TokenAuthFile              string
 	AuthorizationMode          string
 	AuthorizationPolicyFile    string
@@ -73,20 +79,21 @@ type APIServer struct {
 	RuntimeConfig              util.ConfigurationMap
 	KubeletConfig              client.KubeletConfig
 	ClusterName                string
-	SyncPodStatus              bool
 	EnableProfiling            bool
+	MaxRequestsInFlight        int
+	LongRunningRequestRE       string
 }
 
 // NewAPIServer creates a new APIServer object with default parameters
 func NewAPIServer() *APIServer {
 	s := APIServer{
-		WideOpenPort:           8080,
-		Address:                util.IP(net.ParseIP("127.0.0.1")),
-		PublicAddressOverride:  util.IP(net.ParseIP("")),
+		InsecurePort:           8080,
+		InsecureBindAddress:    util.IP(net.ParseIP("127.0.0.1")),
+		BindAddress:            util.IP(net.ParseIP("0.0.0.0")),
 		ReadOnlyPort:           7080,
+		SecurePort:             6443,
 		APIRate:                10.0,
 		APIBurst:               200,
-		SecurePort:             6443,
 		APIPrefix:              "/api",
 		EventTTL:               1 * time.Hour,
 		AuthorizationMode:      "AlwaysAllow",
@@ -94,12 +101,13 @@ func NewAPIServer() *APIServer {
 		EnableLogsSupport:      true,
 		MasterServiceNamespace: api.NamespaceDefault,
 		ClusterName:            "kubernetes",
-		SyncPodStatus:          true,
+		CertDirectory:          "/var/run/kubernetes",
 
 		RuntimeConfig: make(util.ConfigurationMap),
 		KubeletConfig: client.KubeletConfig{
 			Port:        10250,
-			EnableHttps: false,
+			EnableHttps: true,
+			HTTPTimeout: time.Duration(5) * time.Second,
 		},
 	}
 
@@ -110,34 +118,42 @@ func NewAPIServer() *APIServer {
 func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 	// Note: the weird ""+ in below lines seems to be the only way to get gofmt to
 	// arrange these text blocks sensibly. Grrr.
-	fs.IntVar(&s.WideOpenPort, "port", s.WideOpenPort, ""+
-		"The port to listen on. Default 8080. It is assumed that firewall rules are "+
-		"set up such that this port is not reachable from outside of the cluster. It is "+
-		"further assumed that port 443 on the cluster's public address is proxied to this "+
+	fs.IntVar(&s.InsecurePort, "insecure_port", s.InsecurePort, ""+
+		"The port on which to serve unsecured, unauthenticated access. Default 8080. It is assumed "+
+		"that firewall rules are set up such that this port is not reachable from outside of "+
+		"the cluster and that port 443 on the cluster's public address is proxied to this "+
 		"port. This is performed by nginx in the default setup.")
-	fs.Var(&s.Address, "address", "The IP address on to serve on (set to 0.0.0.0 for all interfaces)")
-	fs.Var(&s.PublicAddressOverride, "public_address_override", "Public serving address."+
-		"Read only port will be opened on this address, and it is assumed that port "+
-		"443 at this address will be proxied/redirected to '-address':'-port'. If "+
-		"blank, the address in the first listed interface will be used.")
+	fs.IntVar(&s.InsecurePort, "port", s.InsecurePort, "DEPRECATED: see --insecure_port instead")
+	fs.Var(&s.InsecureBindAddress, "insecure_bind_address", ""+
+		"The IP address on which to serve the --insecure_port (set to 0.0.0.0 for all interfaces). "+
+		"Defaults to localhost.")
+	fs.Var(&s.InsecureBindAddress, "address", "DEPRECATED: see --insecure_bind_address instead")
+	fs.Var(&s.BindAddress, "bind_address", ""+
+		"The IP address on which to serve the --read_only_port and --secure_port ports. This "+
+		"address must be reachable by the rest of the cluster. If blank, all interfaces will be used.")
+	fs.Var(&s.BindAddress, "public_address_override", "DEPRECATED: see --bind_address instead")
 	fs.IntVar(&s.ReadOnlyPort, "read_only_port", s.ReadOnlyPort, ""+
-		"The port from which to serve read-only resources. If 0, don't serve on a "+
-		"read-only address. It is assumed that firewall rules are set up such that "+
-		"this port is not reachable from outside of the cluster.")
+		"The port on which to serve read-only resources. If 0, don't serve read-only "+
+		"at all. It is assumed that firewall rules are set up such that this port is "+
+		"not reachable from outside of the cluster.")
+	fs.IntVar(&s.SecurePort, "secure_port", s.SecurePort, ""+
+		"The port on which to serve HTTPS with authentication and authorization. If 0, "+
+		"don't serve HTTPS at all.")
 	fs.Float32Var(&s.APIRate, "api_rate", s.APIRate, "API rate limit as QPS for the read only port")
 	fs.IntVar(&s.APIBurst, "api_burst", s.APIBurst, "API burst amount for the read only port")
-	fs.IntVar(&s.SecurePort, "secure_port", s.SecurePort,
-		"The port from which to serve HTTPS with authentication and authorization. If 0, don't serve HTTPS ")
 	fs.StringVar(&s.TLSCertFile, "tls_cert_file", s.TLSCertFile, ""+
 		"File containing x509 Certificate for HTTPS.  (CA cert, if any, concatenated after server cert). "+
 		"If HTTPS serving is enabled, and --tls_cert_file and --tls_private_key_file are not provided, "+
 		"a self-signed certificate and key are generated for the public address and saved to /var/run/kubernetes.")
 	fs.StringVar(&s.TLSPrivateKeyFile, "tls_private_key_file", s.TLSPrivateKeyFile, "File containing x509 private key matching --tls_cert_file.")
+	fs.StringVar(&s.CertDirectory, "cert_dir", s.CertDirectory, "The directory where the TLS certs are located (by default /var/run/kubernetes). "+
+		"If --tls_cert_file and --tls_private_key_file are provided, this flag will be ignored.")
 	fs.StringVar(&s.APIPrefix, "api_prefix", s.APIPrefix, "The prefix for API requests on the server. Default '/api'.")
 	fs.StringVar(&s.StorageVersion, "storage_version", s.StorageVersion, "The version to store resources with. Defaults to server preferred")
 	fs.StringVar(&s.CloudProvider, "cloud_provider", s.CloudProvider, "The provider for cloud services.  Empty string for no provider.")
 	fs.StringVar(&s.CloudConfigFile, "cloud_config", s.CloudConfigFile, "The path to the cloud provider configuration file.  Empty string for no configuration file.")
 	fs.DurationVar(&s.EventTTL, "event_ttl", s.EventTTL, "Amount of time to retain events. Default 1 hour.")
+	fs.StringVar(&s.ClientCAFile, "client_ca_file", s.ClientCAFile, "If set, any request presenting a client certificate signed by one of the authorities in the client_ca_file is authenticated with an identity corresponding to the CommonName of the client certificate.")
 	fs.StringVar(&s.TokenAuthFile, "token_auth_file", s.TokenAuthFile, "If set, the file that will be used to secure the secure port of the API server via token authentication.")
 	fs.StringVar(&s.AuthorizationMode, "authorization_mode", s.AuthorizationMode, "Selects how to do authorization on the secure port.  One of: "+strings.Join(apiserver.AuthorizationModeChoices, ","))
 	fs.StringVar(&s.AuthorizationPolicyFile, "authorization_policy_file", s.AuthorizationPolicyFile, "File with authorization policy in csv format, used with --authorization_mode=ABAC, on the secure port.")
@@ -149,11 +165,13 @@ func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 	fs.BoolVar(&s.AllowPrivileged, "allow_privileged", s.AllowPrivileged, "If true, allow privileged containers.")
 	fs.Var(&s.PortalNet, "portal_net", "A CIDR notation IP range from which to assign portal IPs. This must not overlap with any IP ranges assigned to nodes for pods.")
 	fs.StringVar(&s.MasterServiceNamespace, "master_service_namespace", s.MasterServiceNamespace, "The namespace from which the kubernetes master services should be injected into pods")
-	fs.BoolVar(&s.SyncPodStatus, "sync_pod_status", s.SyncPodStatus, "If true, periodically fetch pods statuses from kubelets.")
 	fs.Var(&s.RuntimeConfig, "runtime_config", "A set of key=value pairs that describe runtime configuration that may be passed to the apiserver.")
 	client.BindKubeletClientConfigFlags(fs, &s.KubeletConfig)
 	fs.StringVar(&s.ClusterName, "cluster_name", s.ClusterName, "The instance prefix for the cluster")
-	fs.BoolVar(&s.EnableProfiling, "profiling", false, "Enable profiling via web interface host:port/debug/pprof/")
+	fs.BoolVar(&s.EnableProfiling, "profiling", true, "Enable profiling via web interface host:port/debug/pprof/")
+	fs.StringVar(&s.ExternalHost, "external_hostname", "", "The hostname to use when generating externalized URLs for this master (e.g. Swagger API Docs.)")
+	fs.IntVar(&s.MaxRequestsInFlight, "max_requests_inflight", 400, "The maximum number of requests in flight at a given time.  When the server exceeds this, it rejects requests.  Zero for no limit.")
+	fs.StringVar(&s.LongRunningRequestRE, "long_running_request_regexp", "[.*\\/watch$][^\\/proxy.*]", "A regular expression matching long running requests which should be excluded from maximum inflight request handling.")
 }
 
 // TODO: Longer term we should read this from some config store, rather than a flag.
@@ -187,6 +205,8 @@ func (s *APIServer) Run(_ []string) error {
 
 	capabilities.Initialize(capabilities.Capabilities{
 		AllowPrivileged: s.AllowPrivileged,
+		// TODO(vmarmol): Implement support for HostNetworkSources.
+		HostNetworkSources: []string{},
 	})
 
 	cloud := cloudprovider.InitCloudProvider(s.CloudProvider, s.CloudConfigFile)
@@ -196,11 +216,15 @@ func (s *APIServer) Run(_ []string) error {
 		glog.Fatalf("Failure to start kubelet client: %v", err)
 	}
 
-	_, v1beta3 := s.RuntimeConfig["api/v1beta3"]
+	disableV1beta3 := false
+	v1beta3FlagValue, ok := s.RuntimeConfig["api/v1beta3"]
+	if ok && v1beta3FlagValue == "false" {
+		disableV1beta3 = true
+	}
 
 	// TODO: expose same flags as client.BindClientConfigFlags but for a server
 	clientConfig := &client.Config{
-		Host:    net.JoinHostPort(s.Address.String(), strconv.Itoa(s.WideOpenPort)),
+		Host:    net.JoinHostPort(s.InsecureBindAddress.String(), strconv.Itoa(s.InsecurePort)),
 		Version: s.StorageVersion,
 	}
 	client, err := client.New(clientConfig)
@@ -215,7 +239,7 @@ func (s *APIServer) Run(_ []string) error {
 
 	n := net.IPNet(s.PortalNet)
 
-	authenticator, err := apiserver.NewAuthenticatorFromTokenFile(s.TokenAuthFile)
+	authenticator, err := apiserver.NewAuthenticator(s.ClientCAFile, s.TokenAuthFile)
 	if err != nil {
 		glog.Fatalf("Invalid Authentication Config: %v", err)
 	}
@@ -228,8 +252,31 @@ func (s *APIServer) Run(_ []string) error {
 	admissionControlPluginNames := strings.Split(s.AdmissionControl, ",")
 	admissionController := admission.NewFromPlugins(client, admissionControlPluginNames, s.AdmissionControlConfigFile)
 
+	if len(s.ExternalHost) == 0 {
+		// TODO: extend for other providers
+		if s.CloudProvider == "gce" {
+			instances, supported := cloud.Instances()
+			if !supported {
+				glog.Fatalf("gce cloud provider has no instances.  this shouldn't happen. exiting.")
+			}
+			name, err := os.Hostname()
+			if err != nil {
+				glog.Fatalf("failed to get hostname: %v", err)
+			}
+			addrs, err := instances.NodeAddresses(name)
+			if err != nil {
+				glog.Warningf("unable to obtain external host address from cloud provider: %v", err)
+			} else {
+				for _, addr := range addrs {
+					if addr.Type == api.NodeExternalIP {
+						s.ExternalHost = addr.Address
+					}
+				}
+			}
+		}
+	}
+
 	config := &master.Config{
-		Cloud:                  cloud,
 		EtcdHelper:             helper,
 		EventTTL:               s.EventTTL,
 		KubeletClient:          kubeletClient,
@@ -243,36 +290,43 @@ func (s *APIServer) Run(_ []string) error {
 		CorsAllowedOriginList:  s.CorsAllowedOriginList,
 		ReadOnlyPort:           s.ReadOnlyPort,
 		ReadWritePort:          s.SecurePort,
-		PublicAddress:          net.IP(s.PublicAddressOverride),
+		PublicAddress:          net.IP(s.BindAddress),
 		Authenticator:          authenticator,
 		Authorizer:             authorizer,
 		AdmissionControl:       admissionController,
-		EnableV1Beta3:          v1beta3,
+		DisableV1Beta3:         disableV1beta3,
 		MasterServiceNamespace: s.MasterServiceNamespace,
 		ClusterName:            s.ClusterName,
-		SyncPodStatus:          s.SyncPodStatus,
+		ExternalHost:           s.ExternalHost,
 	}
 	m := master.New(config)
 
 	// We serve on 3 ports.  See docs/accessing_the_api.md
 	roLocation := ""
 	if s.ReadOnlyPort != 0 {
-		roLocation = net.JoinHostPort(config.PublicAddress.String(), strconv.Itoa(s.ReadOnlyPort))
+		roLocation = net.JoinHostPort(s.BindAddress.String(), strconv.Itoa(s.ReadOnlyPort))
 	}
 	secureLocation := ""
 	if s.SecurePort != 0 {
-		secureLocation = net.JoinHostPort(config.PublicAddress.String(), strconv.Itoa(s.SecurePort))
+		secureLocation = net.JoinHostPort(s.BindAddress.String(), strconv.Itoa(s.SecurePort))
 	}
-	wideOpenLocation := net.JoinHostPort(s.Address.String(), strconv.Itoa(s.WideOpenPort))
+	insecureLocation := net.JoinHostPort(s.InsecureBindAddress.String(), strconv.Itoa(s.InsecurePort))
 
 	// See the flag commentary to understand our assumptions when opening the read-only and read-write ports.
+
+	var sem chan bool
+	if s.MaxRequestsInFlight > 0 {
+		sem = make(chan bool, s.MaxRequestsInFlight)
+	}
+
+	longRunningRE := regexp.MustCompile(s.LongRunningRequestRE)
 
 	if roLocation != "" {
 		// Default settings allow 1 read-only request per second, allow up to 20 in a burst before enforcing.
 		rl := util.NewTokenBucketRateLimiter(s.APIRate, s.APIBurst)
 		readOnlyServer := &http.Server{
 			Addr:           roLocation,
-			Handler:        apiserver.RecoverPanics(apiserver.ReadOnly(apiserver.RateLimit(rl, m.InsecureHandler))),
+			Handler:        apiserver.MaxInFlightLimit(sem, longRunningRE, apiserver.RecoverPanics(apiserver.ReadOnly(apiserver.RateLimit(rl, m.InsecureHandler)))),
 			ReadTimeout:    5 * time.Minute,
 			WriteTimeout:   5 * time.Minute,
 			MaxHeaderBytes: 1 << 20,
@@ -292,25 +346,35 @@ func (s *APIServer) Run(_ []string) error {
 	if secureLocation != "" {
 		secureServer := &http.Server{
 			Addr:           secureLocation,
-			Handler:        apiserver.RecoverPanics(m.Handler),
+			Handler:        apiserver.MaxInFlightLimit(sem, longRunningRE, apiserver.RecoverPanics(m.Handler)),
 			ReadTimeout:    5 * time.Minute,
 			WriteTimeout:   5 * time.Minute,
 			MaxHeaderBytes: 1 << 20,
 			TLSConfig: &tls.Config{
 				// Change default from SSLv3 to TLSv1.0 (because of POODLE vulnerability)
 				MinVersion: tls.VersionTLS10,
-				// Populate PeerCertificates in requests, but don't reject connections without certificates
-				// This allows certificates to be validated by authenticators, while still allowing other auth types
-				ClientAuth: tls.RequestClientCert,
 			},
 		}
+
+		if len(s.ClientCAFile) > 0 {
+			clientCAs, err := util.CertPoolFromFile(s.ClientCAFile)
+			if err != nil {
+				glog.Fatalf("unable to load client CA file: %v", err)
+			}
+			// Populate PeerCertificates in requests, but don't reject connections without certificates
+			// This allows certificates to be validated by authenticators, while still allowing other auth types
+			secureServer.TLSConfig.ClientAuth = tls.RequestClientCert
+			// Specify allowed CAs for client certificates
+			secureServer.TLSConfig.ClientCAs = clientCAs
+		}
+
 		glog.Infof("Serving securely on %s", secureLocation)
 		go func() {
 			defer util.HandleCrash()
 			for {
 				if s.TLSCertFile == "" && s.TLSPrivateKeyFile == "" {
-					s.TLSCertFile = "/var/run/kubernetes/apiserver.crt"
-					s.TLSPrivateKeyFile = "/var/run/kubernetes/apiserver.key"
+					s.TLSCertFile = path.Join(s.CertDirectory, "apiserver.crt")
+					s.TLSPrivateKeyFile = path.Join(s.CertDirectory, "apiserver.key")
 					if err := util.GenerateSelfSignedCert(config.PublicAddress.String(), s.TLSCertFile, s.TLSPrivateKeyFile); err != nil {
 						glog.Errorf("Unable to generate self signed cert: %v", err)
 					} else {
@@ -326,13 +390,13 @@ func (s *APIServer) Run(_ []string) error {
 	}
 
 	http := &http.Server{
-		Addr:           wideOpenLocation,
+		Addr:           insecureLocation,
 		Handler:        apiserver.RecoverPanics(m.InsecureHandler),
 		ReadTimeout:    5 * time.Minute,
 		WriteTimeout:   5 * time.Minute,
 		MaxHeaderBytes: 1 << 20,
 	}
-	glog.Infof("Serving insecurely on %s", wideOpenLocation)
+	glog.Infof("Serving insecurely on %s", insecureLocation)
 	glog.Fatal(http.ListenAndServe())
 	return nil
 }

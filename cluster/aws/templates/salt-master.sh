@@ -23,12 +23,20 @@ grains:
   roles:
     - kubernetes-master
   cloud: aws
+  cbr-cidr: "${MASTER_IP_RANGE}"
 EOF
 
-cat <<EOF > /etc/aws.conf
-[Global]
-Region = ${AWS_ZONE}
+if [[ -n "${DOCKER_OPTS}" ]]; then
+  cat <<EOF >>/etc/salt/minion.d/grains.conf
+  docker_opts: '$(echo "$DOCKER_OPTS" | sed -e "s/'/''/g")'
 EOF
+fi
+
+if [[ -n "${DOCKER_ROOT}" ]]; then
+  cat <<EOF >>/etc/salt/minion.d/grains.conf
+  docker_root: '$(echo "$DOCKER_ROOT" | sed -e "s/'/''/g")'
+EOF
+fi
 
 # Auto accept all keys from minions that try to join
 mkdir -p /etc/salt/master.d
@@ -50,5 +58,5 @@ EOF
 #
 # -M installs the master
 set +x
-curl -L --connect-timeout 20 --retry 6 --retry-delay 10 http://bootstrap.saltstack.com | sh -s -- -M -X
+curl -L --connect-timeout 20 --retry 6 --retry-delay 10 https://bootstrap.saltstack.com | sh -s -- -M -X
 set -x

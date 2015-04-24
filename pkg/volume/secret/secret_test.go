@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
+	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/testclient"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/mount"
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/volume"
@@ -52,7 +53,7 @@ func TestCanSupport(t *testing.T) {
 	if plugin.Name() != secretPluginName {
 		t.Errorf("Wrong name: %s", plugin.Name())
 	}
-	if !plugin.CanSupport(&api.Volume{VolumeSource: api.VolumeSource{Secret: &api.SecretVolumeSource{Target: api.ObjectReference{}}}}) {
+	if !plugin.CanSupport(&volume.Spec{Name: "foo", VolumeSource: api.VolumeSource{Secret: &api.SecretVolumeSource{SecretName: ""}}}) {
 		t.Errorf("Expected true")
 	}
 }
@@ -69,10 +70,7 @@ func TestPlugin(t *testing.T) {
 		Name: testVolumeName,
 		VolumeSource: api.VolumeSource{
 			Secret: &api.SecretVolumeSource{
-				Target: api.ObjectReference{
-					Namespace: testNamespace,
-					Name:      testName,
-				},
+				SecretName: testName,
 			},
 		},
 	}
@@ -89,9 +87,7 @@ func TestPlugin(t *testing.T) {
 		},
 	}
 
-	client := &client.Fake{
-		Secret: secret,
-	}
+	client := testclient.NewSimpleFake(&secret)
 
 	pluginMgr := volume.VolumePluginMgr{}
 	pluginMgr.InitPlugins(ProbeVolumePlugins(), newTestHost(t, client))
@@ -101,12 +97,12 @@ func TestPlugin(t *testing.T) {
 		t.Errorf("Can't find the plugin by name")
 	}
 
-	builder, err := plugin.NewBuilder(volumeSpec, &api.ObjectReference{UID: types.UID(testPodUID)})
+	builder, err := plugin.NewBuilder(volume.NewSpecFromVolume(volumeSpec), &api.ObjectReference{UID: types.UID(testPodUID)}, volume.VolumeOptions{})
 	if err != nil {
 		t.Errorf("Failed to make a new Builder: %v", err)
 	}
 	if builder == nil {
-		t.Errorf("Got a nil Builder: %v")
+		t.Errorf("Got a nil Builder")
 	}
 
 	volumePath := builder.GetPath()
@@ -148,7 +144,7 @@ func TestPlugin(t *testing.T) {
 		t.Errorf("Failed to make a new Cleaner: %v", err)
 	}
 	if cleaner == nil {
-		t.Errorf("Got a nil Cleaner: %v")
+		t.Errorf("Got a nil Cleaner")
 	}
 
 	if err := cleaner.TearDown(); err != nil {
