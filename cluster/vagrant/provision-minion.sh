@@ -95,6 +95,6 @@ yum -y install docker-io
 
 CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
 rm -rf $CONTRAIL_KUBERNETES
-yum -y install ruby git
+sudo yum -y install ruby git
 git clone https://github.com/rombie/contrail-kubernetes.git $CONTRAIL_KUBERNETES
-ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb compute
+sudo ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb compute

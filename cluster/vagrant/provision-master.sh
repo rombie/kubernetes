@@ -57,6 +57,7 @@ for (( i=0; i<${#MINION_NAMES[@]}; i++)); do
   fi
   echo "127.0.0.1 localhost" >> /etc/hosts # enables cmds like 'kubectl get pods' on master.
 done
+echo "$MASTER_IP $MASTER_NAME" >> /etc/hosts
 
 # Update salt configuration
 mkdir -p /etc/salt/minion.d
@@ -218,6 +219,6 @@ fi
 
 CONTRAIL_KUBERNETES=$HOME/contrail-kubernetes
 rm -rf $CONTRAIL_KUBERNETES
-yum -y install ruby git
+sudo yum -y install ruby git
 git clone https://github.com/rombie/contrail-kubernetes.git $CONTRAIL_KUBERNETES
-ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb controller
+sudo ruby $CONTRAIL_KUBERNETES/scripts/opencontrail-install/contrail_install.rb controller
