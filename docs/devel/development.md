@@ -7,7 +7,7 @@
 
 # Releases and Official Builds
 
-Official releases are built in Docker containers.  Details are [here](http://releases.k8s.io/v1.0.2/build/README.md).  You can do simple builds and development with just a local Docker installation.  If want to build go locally outside of docker, please continue below.
+Official releases are built in Docker containers.  Details are [here](http://releases.k8s.io/v1.0.4/build/README.md).  You can do simple builds and development with just a local Docker installation.  If want to build go locally outside of docker, please continue below.
 
 ## Go development environment
 
@@ -31,8 +31,8 @@ Below, we outline one of the more common git workflows that core developers use.
 The commands below require that you have $GOPATH set ([$GOPATH docs](https://golang.org/doc/code.html#GOPATH)). We highly recommend you put Kubernetes' code into your GOPATH. Note: the commands below will not work if there is more than one directory in your `$GOPATH`.
 
 ```sh
-mkdir -p $GOPATH/src/github.com/GoogleCloudPlatform/
-cd $GOPATH/src/github.com/GoogleCloudPlatform/
+mkdir -p $GOPATH/src/k8s.io
+cd $GOPATH/src/k8s.io
 # Replace "$YOUR_GITHUB_USERNAME" below with your github username
 git clone https://github.com/$YOUR_GITHUB_USERNAME/kubernetes.git
 cd kubernetes
@@ -107,8 +107,8 @@ Here's a quick walkthrough of one way to use godeps to add or update a Kubernete
 
 ```sh
 export KPATH=$HOME/code/kubernetes
-mkdir -p $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
-cd $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+mkdir -p $KPATH/src/k8s.io/kubernetes
+cd $KPATH/src/k8s.io/kubernetes
 git clone https://path/to/your/fork .
 # Or copy your existing local repo here. IMPORTANT: making a symlink doesn't work.
 ```
@@ -134,13 +134,13 @@ godep restore
 
 ```sh
 # To add a new dependency, do:
-cd $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+cd $KPATH/src/k8s.io/kubernetes
 go get path/to/dependency
 # Change code in Kubernetes to use the dependency.
 godep save ./...
 
 # To update an existing dependency, do:
-cd $KPATH/src/github.com/GoogleCloudPlatform/kubernetes
+cd $KPATH/src/k8s.io/kubernetes
 go get -u path/to/dependency
 # Change code in Kubernetes accordingly if necessary.
 godep update path/to/dependency
@@ -184,7 +184,7 @@ $ cd pkg/kubelet
 $ godep go test
 # some output from unit tests
 PASS
-ok      github.com/GoogleCloudPlatform/kubernetes/pkg/kubelet   0.317s
+ok      k8s.io/kubernetes/pkg/kubelet   0.317s
 ```
 
 ## Coverage
@@ -296,7 +296,7 @@ The conformance test runs a subset of the e2e-tests against a manually-created c
 require support for up/push/down and other operations.  To run a conformance test, you need to know the
 IP of the master for your cluster and the authorization arguments to use.  The conformance test is
 intended to run against a cluster at a specific binary release of Kubernetes.
-See [conformance-test.sh](http://releases.k8s.io/v1.0.2/hack/conformance-test.sh).
+See [conformance-test.sh](http://releases.k8s.io/v1.0.4/hack/conformance-test.sh).
 
 ## Testing out flaky tests
 

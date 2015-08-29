@@ -22,15 +22,15 @@ import (
 	"net"
 	"time"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/client/record"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/fields"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/labels"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/types"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
 	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/client"
+	"k8s.io/kubernetes/pkg/client/record"
+	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/fields"
+	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util"
 )
 
 var (
@@ -409,12 +409,13 @@ func (nc *NodeController) monitorNodeStatus() error {
 				}
 				if _, err := instances.ExternalID(node.Name); err != nil && err == cloudprovider.InstanceNotFound {
 					glog.Infof("Deleting node (no longer present in cloud provider): %s", node.Name)
+					if err := nc.deletePods(node.Name); err != nil {
+						glog.Errorf("Unable to delete pods from node %s: %v", node.Name, err)
+						continue
+					}
 					if err := nc.kubeClient.Nodes().Delete(node.Name); err != nil {
 						glog.Errorf("Unable to delete node %s: %v", node.Name, err)
 						continue
-					}
-					if err := nc.deletePods(node.Name); err != nil {
-						glog.Errorf("Unable to delete pods from node %s: %v", node.Name, err)
 					}
 				}
 			}

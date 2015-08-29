@@ -27,11 +27,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/api/resource"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/cloudprovider"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util"
-	"github.com/GoogleCloudPlatform/kubernetes/pkg/util/wait"
+	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/util/wait"
 
 	"code.google.com/p/gcfg"
 	compute "code.google.com/p/google-api-go-client/compute/v1"
@@ -443,9 +443,15 @@ func (gce *GCECloud) CreateTCPLoadBalancer(name, region string, externalIP net.I
 }
 
 // This is kind of hacky, but the managed instance group adds 4 random chars and a hyphen
-// to the base name.
+// to the base name. Older naming schemes put a hyphen and an incrementing index after
+// the base name. Thus we pull off the characters after the final dash to support both.
 func (gce *GCECloud) computeHostTag(host string) string {
-	return host[:len(host)-5]
+	host = strings.SplitN(host, ".", 2)[0]
+	lastHyphen := strings.LastIndex(host, "-")
+	if lastHyphen == -1 {
+		return host
+	}
+	return host[:lastHyphen]
 }
 
 // UpdateTCPLoadBalancer is an implementation of TCPLoadBalancer.UpdateTCPLoadBalancer.

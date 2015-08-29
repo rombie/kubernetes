@@ -247,9 +247,9 @@ function upload-server-tars() {
 #   MINION_NAMES
 function detect-minion-names {
   detect-project
-  MINION_NAMES=($(gcloud preview --project "${PROJECT}" instance-groups \
-    --zone "${ZONE}" instances --group "${NODE_INSTANCE_PREFIX}-group" list \
-    | cut -d'/' -f11))
+  MINION_NAMES=($(gcloud compute instance-groups managed list-instances \
+    "${NODE_INSTANCE_PREFIX}-group" --zone "${ZONE}" --project "${PROJECT}" \
+    --format=yaml | grep instance: | cut -d ' ' -f 2))
   echo "MINION_NAMES=${MINION_NAMES[*]}" >&2
 }
 
@@ -487,6 +487,11 @@ function yaml-quote {
 }
 
 function write-master-env {
+  # If the user requested that the master be part of the cluster, set the
+  # environment variable to program the master kubelet to register itself.
+  if [[ "${REGISTER_MASTER_KUBELET:-}" == "true" ]]; then
+    KUBELET_APISERVER="${MASTER_NAME}"
+  fi
   build-kube-env true "${KUBE_TEMP}/master-kube-env.yaml"
 }
 
@@ -759,7 +764,7 @@ function kube-down {
 
   # The gcloud APIs don't return machine parseable error codes/retry information. Therefore the best we can
   # do is parse the output and special case particular responses we are interested in.
-  if gcloud compute instance-groups managed describe --project "${PROJECT}" --zone "${ZONE}" "${NODE_INSTANCE_PREFIX}-group" &>/dev/null; then
+  if gcloud compute instance-groups managed describe "${NODE_INSTANCE_PREFIX}-group" --project "${PROJECT}" --zone "${ZONE}" &>/dev/null; then
     deleteCmdOutput=$(gcloud compute instance-groups managed delete --zone "${ZONE}" \
       --project "${PROJECT}" \
       --quiet \
@@ -1001,10 +1006,11 @@ function prepare-push() {
     # being used, create a temp one, then delete the old one and recreate it once again.
     create-node-instance-template "tmp"
 
-    gcloud compute instance-groups managed --zone "${ZONE}" \
-      set-template "${NODE_INSTANCE_PREFIX}-group" \
-      --project "${PROJECT}" \
-      --template "${NODE_INSTANCE_PREFIX}-template-tmp" || true;
+    gcloud compute instance-groups managed \
+      set-instance-template "${NODE_INSTANCE_PREFIX}-group" \
+      --template "${NODE_INSTANCE_PREFIX}-template-tmp" \
+      --zone "${ZONE}" \
+      --project "${PROJECT}" || true;
 
     gcloud compute instance-templates delete \
       --project "${PROJECT}" \
@@ -1013,10 +1019,11 @@ function prepare-push() {
 
     create-node-instance-template
 
-    gcloud compute instance-groups managed --zone "${ZONE}" \
-      set-template "${NODE_INSTANCE_PREFIX}-group" \
-      --project "${PROJECT}" \
-      --template "${NODE_INSTANCE_PREFIX}-template" || true;
+    gcloud compute instance-groups managed \
+      set-instance-template "${NODE_INSTANCE_PREFIX}-group" \
+      --template "${NODE_INSTANCE_PREFIX}-template" \
+      --zone "${ZONE}" \
+      --project "${PROJECT}" || true;
 
     gcloud compute instance-templates delete \
       --project "${PROJECT}" \
